@@ -10,50 +10,45 @@ st.markdown("""
 
 st.divider()
 
-# ── Why this tool ────────────────────────────────────────────────
+# ── Quick overview ───────────────────────────────────────────────
 
-st.subheader("Why this tool?")
+st.subheader("What is this?")
 st.markdown("""
-SEMRush and Ahrefs are great at pulling raw data — keyword lists, competitor analysis,
-search volume numbers. But they hand you a spreadsheet with **thousands of keywords** and
-say *"good luck."*
-
-**The gap:** Someone still has to sit down and manually decide which keywords actually matter
-for *this specific client*, which page each keyword belongs on, and what new content to create.
-That's hours of expert work per client.
-
-**This tool fills that gap.** It takes the raw keyword data and does the thinking:
+A 4-step workflow that takes a competitor's keywords and turns them into an **action plan**
+for your client: which pages to optimize, which new pages to create, and writer-ready
+content briefs for each one.
 """)
 
-col_why1, col_why2, col_why3 = st.columns(3)
-
-with col_why1:
-    st.markdown("""
-    **SEMRush gives you:**
-    - 5,000 keyword gap results
-    - Raw volume and difficulty numbers
-    - No client-specific filtering
-    """)
-
-with col_why2:
-    st.markdown("""
-    **This tool gives you:**
-    - Only the keywords that matter for *this* client
-    - Each keyword assigned to a specific page
-    - A clear list of new pages to create
-    """)
-
-with col_why3:
-    st.markdown("""
-    **The outcome:**
-    - Hours of manual work → minutes
-    - An action plan, not a data dump
-    - Ready-to-execute content briefs
-    """)
-
+st.subheader("Why we built it")
 st.markdown("""
-Think of it this way: **SEMRush is the research.** This tool is the **strategy.**
-Pull keywords directly from SEMRush using the built-in API integration, or upload a CSV — either way, this tool turns raw data into a plan your team can act on.
+SEMRush gives you raw data — thousands of keywords in a spreadsheet. The hard part is
+deciding which ones matter for *your specific client* and what to actually do with them.
+That manual filtering and mapping takes hours. **This tool automates it** with AI that
+knows your client's business.
+""")
+
+st.subheader("How it's different from SEMRush")
+st.markdown("""
+**SEMRush = data collection. This tool = data decision-making.**
+
+| SEMRush | This Tool |
+|---------|-----------|
+| Pulls keyword lists | Classifies which keywords are relevant to YOUR client |
+| Shows what competitors rank for | Maps each keyword to a specific page on your client's site |
+| Raw spreadsheets | Action plan: optimize this page, create that page, write this blog |
+| No content guidance | Generates full content briefs a writer can execute |
+
+SEMRush is the input. This tool is the output.
+""")
+
+st.subheader("How to get started")
+st.markdown("""
+1. **Client Setup** — Enter the client's domain, crawl their site, generate an AI profile
+2. **Keyword Cleaning** — Pull competitor keywords from SEMRush (built in) → AI sorts into Keep/Remove/Unsure
+3. **Keyword Mapping** — AI assigns each keyword to an existing URL or flags it as "needs a new page"
+4. **Content Briefs** — AI generates detailed, writer-ready briefs for every new page needed
+
+Start at Step 1, the tool guides you through the rest.
 """)
 
 st.divider()
