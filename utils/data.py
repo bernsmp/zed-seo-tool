@@ -79,7 +79,7 @@ def load_latest_results(slug: str, result_type: str) -> Optional[dict]:
 
 
 def parse_keyword_csv(file) -> pd.DataFrame:
-    """Parse a keyword CSV (SEMRush export or generic).
+    """Parse a keyword CSV (SEMRush export, API pull, or generic).
     Auto-detects delimiter. Normalizes column names to lowercase.
     """
     # Read a sample to detect delimiter

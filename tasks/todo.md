@@ -42,7 +42,7 @@
 
 - **Environment variables needed:**
   - `OPENROUTER_API_KEY` — Required for LLM calls
-  - `DEFAULT_LLM_MODEL` — Optional (defaults to anthropic/claude-sonnet-4-5-20250929)
+  - `DEFAULT_LLM_MODEL` — Optional (defaults to anthropic/claude-haiku-4.5)
 
 - **Known limitations:**
   - SEMRush API not integrated (v1.1 — CSV upload covers all v1 use cases)
@@ -51,3 +51,157 @@
   - No Excel export formatting (v1.1)
   - Browser refresh during processing requires manual "Load Previous Results" click
   - Data editor changes in review tabs don't persist back to results (display only for now)
+
+---
+
+## Post-Build Fixes (Session 2)
+
+- **UI/UX improvements:**
+  - Moved "How It Works" page under "Resources" section in sidebar (separated from Workflow)
+  - Added branded hero headers with step badges (Step 1/2/3) to all pages
+  - Added contextual descriptions to each page header
+  - How It Works page gets distinct purple theme to stand out from workflow pages
+  - Hidden Streamlit's default anchor link icons on headers via CSS
+
+- **Bug fixes:**
+  - Fixed invalid OpenRouter model ID: `anthropic/claude-haiku-4-5-20251001` → `anthropic/claude-haiku-4.5`
+  - Fixed JSON parser: Haiku returns JSON inside markdown code fences — added regex extraction
+  - Fixed response_format: `json_schema` mode doesn't work with Claude on OpenRouter — switched to `json_object` + explicit JSON instructions in prompts
+  - Updated MODEL_PRICING table with correct model IDs
+
+- **Testing results:**
+  - Client Setup: Crawled trackablemed.com (50 pages), profile generated with accurate data
+  - Keyword Cleaning: 10 test keywords classified correctly (KEEP/REMOVE/UNSURE with good reasoning)
+  - Keyword Mapping: 5 keywords mapped to correct URLs with 88-95% confidence scores
+
+---
+
+## Session 3: QC, Confidence Scores, UX Polish
+
+### Todo
+
+- [x] 1. Add confidence scores (0-100) to keyword classifications
+  - Updated LLM prompt to return confidence per keyword
+  - ProgressColumn bars in results tables (cleaning + mapping)
+  - Avg Confidence metric in summary row
+
+- [x] 2. Add QC summary after cleaning completes
+  - Second LLM pass reviews classification quality
+  - QC card with score, flagged keywords, tips
+  - "Flagged for Review" tab for confidence < 70%
+
+- [x] 3. Add clear instructions/hand-holding on every page
+  - All 3 pages: "How does this work?" expandable guide with numbered steps
+  - Info callouts replacing plain st.warning/st.info
+  - Help tooltips on all profile text areas
+  - Descriptive captions on every tab and section
+  - "Next step" callouts guiding users through the workflow
+
+- [x] 4. Brainstorm & document additional tool ideas (present to user)
+
+---
+
+## Additional Tool Ideas (Brainstorm)
+
+### High-Impact (Next Sprint)
+
+1. **Content Gap Analyzer**
+   - Compare client's existing content coverage against keyword clusters
+   - Show which topics have pages vs. which are uncovered
+   - Output: prioritized list of new pages/posts to create, sorted by opportunity (volume x gap)
+
+2. **Keyword Clustering / Grouping**
+   - Group related keywords into topic clusters (e.g., "knee replacement" + "knee surgery cost" + "knee surgery recovery")
+   - Suggest one target page per cluster instead of per keyword
+   - Reduces content cannibalization, speeds up strategy
+
+3. **SERP Intent Analyzer**
+   - For top keywords, pull SERP data to see what's actually ranking (service pages vs blogs vs videos)
+   - Helps validate whether a keyword needs a service page, blog post, or something else
+   - Could use SEMRush/Ahrefs API or scrape
+
+4. **Competitor Keyword Overlap Matrix**
+   - Upload multiple competitor keyword lists
+   - Show: keywords only competitor A has, keywords all competitors share, keywords nobody targets
+   - Heatmap visualization of competitive coverage
+
+### Medium-Impact (v2)
+
+5. **On-Page Optimization Scorer**
+   - For each mapped keyword + URL pair, crawl the page and score:
+     - Title tag (keyword presence, length)
+     - H1, H2s, meta description
+     - Content length, keyword density
+   - Output: actionable checklist per page
+
+6. **Internal Linking Recommender**
+   - Analyze the URL inventory for internal linking opportunities
+   - For each page, suggest other client pages to link to/from
+   - Based on topical relevance and keyword mapping
+
+7. **Rank Tracking Dashboard**
+   - Import rank data over time (from SEMRush CSV exports)
+   - Show keyword position trends, winners/losers
+   - Correlate with content changes or new pages
+
+8. **AI Content Brief Generator**
+   - Given a keyword cluster and target URL (or NEW_PAGE)
+   - Generate a content brief: target word count, H2 outline, related keywords to include, competitor analysis
+   - Ready for a writer to execute
+
+### Nice-to-Have (v3)
+
+9. **Technical SEO Audit (Lite)**
+   - During site crawl, flag common issues: missing meta descriptions, duplicate titles, slow pages, broken links
+   - Quick wins report
+
+10. **Client Reporting Template**
+    - Auto-generate a PDF/PPTX summary of the keyword research
+    - Stats, key findings, recommendations, next steps
+    - Branded with client logo
+
+---
+
+## Session 4: Content Brief Generator (Step 4)
+
+### Todo
+
+- [x] 1. Add LLM functions for content briefs
+  - `cluster_keywords()` — groups related keywords into topic clusters
+  - `generate_content_brief()` — generates 5-section briefs (overview, audience, direction, SEO, CTA)
+  - Updated `estimate_cost()` with "briefs" task type
+
+- [x] 2. Build `pages/content_briefs.py`
+  - Hero header "Step 4 of 4", how-it-works guide, client selection
+  - Auto-loads mapping results, filters to New Page + Blog Post keywords
+  - Clustering → brief generation with progress bar and auto-save
+  - Expandable brief cards with all 5 sections
+  - Copy-to-clipboard text area per brief
+  - CSV export (flattened)
+
+- [x] 3. Register page in app.py navigation
+  - Added `content_briefs` to Workflow section
+  - Updated step badges: "Step X of 3" → "Step X of 4" on all pages
+
+- [x] 4. UX copy updates
+  - Keyword Mapping hero/guide rewritten to spell out outcomes and actions
+  - How It Works page: new "Why this tool?" section, 4-step workflow, new glossary/FAQ entries
+  - "Why can't I just do this in SEMRush?" FAQ added
+
+### Review
+
+- **Summary of changes:**
+  - `utils/llm.py` — Added `cluster_keywords()` and `generate_content_brief()` functions, "briefs" branch in `estimate_cost()`
+  - `pages/content_briefs.py` — New Step 4 page (clustering → brief generation → review → export)
+  - `app.py` — Registered Content Briefs in navigation Workflow section
+  - `pages/client_setup.py`, `keyword_cleaning.py`, `keyword_mapping.py` — Step badges updated to "of 4"
+  - `pages/keyword_mapping.py` — Hero/guide copy rewritten for clarity and outcomes
+  - `pages/how_it_works.py` — Major rewrite: "Why this tool?" section, 4-step workflow, new glossary/FAQ
+
+- **No new dependencies added**
+
+- **Known limitations:**
+  - Content Briefs requires mapping results from Step 3 (no standalone mode yet)
+  - Brief quality depends on client profile completeness
+  - No brief editing/customization UI (export and edit externally)
+  - Copy-to-clipboard uses text_area (manual select+copy, not one-click)

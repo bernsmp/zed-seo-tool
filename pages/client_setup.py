@@ -8,43 +8,76 @@ from utils.data import (
 from utils.crawler import crawl_site
 from utils.llm import generate_client_profile
 
-st.header("Client Setup")
-st.write("Build a structured client profile by crawling their website.")
+st.markdown("""
+<div class="page-hero">
+    <span class="step-badge">Step 1 of 4</span>
+    <h1>Client Setup</h1>
+    <p>Enter a client's domain and we'll crawl their site to build an SEO profile — services, locations, specialties, and a full URL inventory.</p>
+</div>
+""", unsafe_allow_html=True)
+
+# ── How it works guide ───────────────────────────────────────────
+
+with st.expander("How does this work?", expanded=False):
+    st.markdown("""
+    <div class="guide-step">
+        <span class="step-num">1</span>
+        <span class="step-title">Enter client name & domain</span>
+        <div class="step-desc">Give the client a name and enter their website domain (e.g. <strong>example.com</strong>). This is used to crawl their site and build a profile.</div>
+    </div>
+    <div class="guide-step">
+        <span class="step-num">2</span>
+        <span class="step-title">Crawl the site</span>
+        <div class="step-desc">Click "Crawl Site & Generate Profile" to pull the client's sitemap, extract page content, and build a URL inventory. The AI then analyzes the pages to identify services, locations, and specialties.</div>
+    </div>
+    <div class="guide-step">
+        <span class="step-num">3</span>
+        <span class="step-title">Review & edit the profile</span>
+        <div class="step-desc">The AI-generated profile appears below. Review every field — add missing services, fix locations, remove anything wrong. You can also add <strong>negative keywords</strong> (competitor names, irrelevant terms) to improve cleaning accuracy.</div>
+    </div>
+    <div class="guide-step">
+        <span class="step-num">4</span>
+        <span class="step-title">Save & continue</span>
+        <div class="step-desc">Hit Save to store the profile. Then head to <strong>Keyword Cleaning</strong> (Step 2) to start filtering keywords against this profile.</div>
+    </div>
+    """, unsafe_allow_html=True)
 
 # ── Load existing profile ────────────────────────────────────────
 
 clients = list_clients()
 if clients:
-    st.subheader("Load Existing Profile")
-    selected = st.selectbox("Select client", ["-- New Client --"] + clients)
+    selected = st.selectbox("Select client to edit, or create new", ["-- New Client --"] + clients)
     if selected != "-- New Client --":
         profile = load_client_profile(selected)
         if profile:
             st.session_state.client_profile = profile
             st.session_state.client_slug = selected
-            st.success(f"Loaded profile for **{profile.get('business_name', selected)}**")
+else:
+    selected = "-- New Client --"
 
 st.divider()
 
-# ── New client setup ─────────────────────────────────────────────
+# ── Client name & domain ────────────────────────────────────────
 
-st.subheader("Create / Edit Profile")
+profile = st.session_state.get("client_profile", {})
+
+st.subheader("Client Info")
 
 col1, col2 = st.columns(2)
 with col1:
     client_name = st.text_input(
         "Client Name",
-        value=st.session_state.get("client_profile", {}).get("business_name", ""),
+        value=profile.get("business_name", ""),
     )
 with col2:
     domain = st.text_input(
         "Domain (e.g. example.com)",
-        value=st.session_state.get("client_profile", {}).get("domain", ""),
+        value=profile.get("domain", ""),
     )
 
 # ── Crawl site ───────────────────────────────────────────────────
 
-if domain and st.button("Crawl Site & Generate Profile"):
+if domain and st.button("Crawl Site & Generate Profile", type="primary"):
     with st.status("Crawling site...", expanded=True) as status:
         progress_bar = st.progress(0)
         status_text = st.empty()
@@ -57,7 +90,11 @@ if domain and st.button("Crawl Site & Generate Profile"):
         pages = crawl_site(domain, max_pages=50, delay=1.0, progress_callback=update_progress)
 
         if not pages:
-            st.warning("No pages found. You can fill in the profile manually below.")
+            st.markdown("""
+            <div class="info-callout">
+                No pages found from the crawl. This can happen if the site blocks crawlers or has no sitemap. You can still fill in the profile manually below.
+            </div>
+            """, unsafe_allow_html=True)
             st.session_state.crawled_pages = []
         else:
             st.write(f"Crawled {len(pages)} pages. Generating profile...")
@@ -81,12 +118,13 @@ if domain and st.button("Crawl Site & Generate Profile"):
 
 # ── Editable profile form ────────────────────────────────────────
 
+# Re-read profile in case crawl just updated it
 profile = st.session_state.get("client_profile", {})
 
 if profile or client_name:
     st.divider()
     st.subheader("Profile Details")
-    st.caption("Edit any field, then click Save.")
+    st.caption("Review and edit every field — the AI uses this profile to classify keywords in Step 2.")
 
     business_name = st.text_input(
         "Business Name",
@@ -103,30 +141,35 @@ if profile or client_name:
         "Services (one per line)",
         value="\n".join(profile.get("services", [])),
         key="edit_services",
+        help="List all services the client offers. These are used to determine which keywords are relevant.",
     )
     locations = st.text_area(
         "Locations Served (one per line)",
         value="\n".join(profile.get("locations", [])),
         key="edit_locations",
+        help="Cities, states, or regions the client serves. Keywords for other locations will be flagged for removal.",
     )
     specialties = st.text_area(
         "Specialties (one per line)",
         value="\n".join(profile.get("specialties", [])),
         key="edit_specialties",
+        help="Specific areas of expertise, conditions treated, or niche focus areas.",
     )
     topics = st.text_area(
         "Key Topics (one per line)",
         value="\n".join(profile.get("topics", [])),
         key="edit_topics",
+        help="Broad content topics the client covers (e.g. 'patient acquisition', 'practice growth').",
     )
 
     st.divider()
     st.subheader("Negative Keywords")
-    st.caption("Terms to always REMOVE during keyword cleaning (competitor names, wrong locations, etc.).")
+    st.caption("Terms to always REMOVE during keyword cleaning — competitor names, wrong locations, irrelevant specialties.")
     negative_keywords = st.text_area(
         "Negative Keywords (one per line)",
         value="\n".join(profile.get("negative_keywords", [])),
         key="edit_negatives",
+        help="Any keyword containing these terms will be automatically flagged for removal during cleaning.",
     )
 
     # ── Save ─────────────────────────────────────────────────────
@@ -163,5 +206,14 @@ if profile or client_name:
     url_inv = profile.get("url_inventory", [])
     if url_inv:
         with st.expander(f"URL Inventory ({len(url_inv)} pages)"):
+            st.caption("These URLs are used in Keyword Mapping (Step 3) to match keywords to existing pages.")
             for page in url_inv:
                 st.write(f"**{page.get('title', 'Untitled')}** — {page['url']}")
+
+    # ── Next step callout ────────────────────────────────────────
+
+    st.markdown("""
+    <div class="info-callout">
+        <strong>Next step:</strong> Once your profile is saved, head to <strong>Keyword Cleaning</strong> (Step 2) to upload keywords and start filtering them against this profile.
+    </div>
+    """, unsafe_allow_html=True)

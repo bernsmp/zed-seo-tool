@@ -41,13 +41,14 @@ def _get_client() -> OpenAI:
 
 
 def _model() -> str:
-    return os.getenv("DEFAULT_LLM_MODEL", "anthropic/claude-haiku-4-5-20251001")
+    return os.getenv("DEFAULT_LLM_MODEL", "anthropic/claude-haiku-4.5")
 
 
 # ── Pricing table ($ per 1M tokens on OpenRouter) ───────────────
 
 MODEL_PRICING = {
-    "anthropic/claude-haiku-4-5-20251001": {"input": 1.00, "output": 5.00},
+    "anthropic/claude-haiku-4.5": {"input": 1.00, "output": 5.00},
+    "anthropic/claude-3.5-haiku": {"input": 1.00, "output": 5.00},
     "anthropic/claude-sonnet-4-5-20250929": {"input": 3.00, "output": 15.00},
     "google/gemini-2.5-flash": {"input": 0.30, "output": 2.50},
     "moonshotai/kimi-k2": {"input": 0.50, "output": 2.40},
@@ -141,13 +142,22 @@ def _chat(messages: list[dict], response_format: Optional[dict] = None, task: st
 
 
 def _parse_json(text: str) -> dict | list:
-    """Parse JSON from LLM response, handling markdown fences."""
+    """Parse JSON from LLM response, handling markdown fences and extra text."""
     text = text.strip()
-    if text.startswith("```"):
-        # Strip markdown code block
-        lines = text.split("\n")
-        lines = [l for l in lines if not l.strip().startswith("```")]
-        text = "\n".join(lines)
+    # Extract content between code fences if present
+    if "```" in text:
+        import re
+        match = re.search(r"```(?:json)?\s*\n(.*?)\n```", text, re.DOTALL)
+        if match:
+            text = match.group(1).strip()
+    # Fallback: find first { or [ and extract to matching close
+    if not text.startswith(("{", "[")):
+        start = min(
+            (text.find(c) for c in ("{", "[") if text.find(c) >= 0),
+            default=-1,
+        )
+        if start >= 0:
+            text = text[start:]
     return json.loads(text)
 
 
@@ -271,15 +281,214 @@ Rules:
 - Be conservative: UNSURE rather than incorrect REMOVE.
 - Generic single-word terms → REMOVE
 - Location terms for OTHER locations → REMOVE
-- Competitor/doctor names → REMOVE"""
+- Competitor/doctor names → REMOVE
+
+Return ONLY a JSON object in this exact format:
+{{"classifications": [{{"keyword": "...", "classification": "KEEP|REMOVE|UNSURE", "confidence": 85, "reason": "brief explanation"}}]}}
+
+Confidence scoring (0-100):
+- 90-100: Obvious call, no ambiguity
+- 70-89: Strong signal but minor doubt
+- 50-69: Borderline, could go either way
+- Below 50: Low confidence, flag for human review"""
 
     raw = _chat(
         [{"role": "user", "content": prompt}],
-        response_format=CLASSIFICATION_SCHEMA,
+        response_format={"type": "json_object"},
         task="classify_keywords",
     )
     data = _parse_json(raw)
     return data.get("classifications", data) if isinstance(data, dict) else data
+
+
+def generate_qc_summary(profile: dict, results: list[dict]) -> dict:
+    """Generate a QC summary reviewing the classification results.
+
+    Returns dict with overall_assessment, flagged_keywords, and recommendations.
+    """
+    # Find the lowest-confidence and borderline classifications
+    sorted_by_conf = sorted(results, key=lambda r: r.get("confidence", 50))
+    bottom_5 = sorted_by_conf[:5]
+
+    bottom_lines = "\n".join(
+        f"- \"{r.get('keyword', '')}\" → {r.get('classification', '?')} "
+        f"(confidence: {r.get('confidence', '?')}) — {r.get('reason', '')}"
+        for r in bottom_5
+    )
+
+    keep_count = sum(1 for r in results if r.get("classification") == "KEEP")
+    remove_count = sum(1 for r in results if r.get("classification") == "REMOVE")
+    unsure_count = sum(1 for r in results if r.get("classification") == "UNSURE")
+    avg_conf = sum(r.get("confidence", 50) for r in results) / max(len(results), 1)
+
+    prompt = f"""You are a QC reviewer for SEO keyword classifications.
+
+CLIENT: {profile.get('business_name', 'Unknown')} ({profile.get('domain', '')})
+SERVICES: {', '.join(profile.get('services', [])[:5])}
+
+CLASSIFICATION SUMMARY:
+- Total: {len(results)} keywords
+- Keep: {keep_count}, Remove: {remove_count}, Unsure: {unsure_count}
+- Average confidence: {avg_conf:.0f}/100
+
+LOWEST CONFIDENCE CLASSIFICATIONS (review these):
+{bottom_lines}
+
+Provide a brief QC assessment:
+1. Are the classifications reasonable given the client profile?
+2. Which specific keywords (if any) might be misclassified?
+3. Any patterns you notice (e.g., too aggressive removing, too many UNSURE)?
+
+Return ONLY a JSON object:
+{{"overall_quality": "good|fair|needs_review", "score": 85, "flagged_keywords": [{{"keyword": "...", "current": "KEEP|REMOVE|UNSURE", "suggested": "KEEP|REMOVE|UNSURE", "reason": "why this might be wrong"}}], "summary": "2-3 sentence overall assessment", "tip": "one actionable suggestion"}}"""
+
+    raw = _chat(
+        [{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"},
+        task="qc_summary",
+    )
+    return _parse_json(raw)
+
+
+def cluster_keywords(keywords: list[dict]) -> list[dict]:
+    """Cluster related keywords into topic groups for content briefs.
+
+    Args:
+        keywords: List of dicts with 'keyword', 'recommendation' (New Page/Blog Post),
+                  and optionally 'volume', 'search_intent', 'notes'.
+
+    Returns:
+        List of cluster dicts: [{
+            "cluster_name": "short topic name",
+            "content_type": "service_page" or "blog_post",
+            "primary_keyword": "highest-volume keyword",
+            "secondary_keywords": ["other", "related", "keywords"],
+            "total_volume": 1234,
+            "intent_summary": "what searchers want",
+            "priority_score": 85
+        }]
+    """
+    keyword_lines = "\n".join(
+        f"- {kw['keyword']}"
+        + (f" (Volume: {kw.get('volume', 'N/A')}, Intent: {kw.get('search_intent', kw.get('intent', 'N/A'))}, Type: {kw.get('recommendation', 'N/A')})" if kw.get("volume") else f" (Type: {kw.get('recommendation', 'N/A')})")
+        for kw in keywords
+    )
+
+    prompt = f"""You are an SEO keyword clustering expert.
+
+KEYWORDS TO CLUSTER:
+{keyword_lines}
+
+Group these keywords into topic clusters. Keywords in the same cluster should:
+- Target the same search intent / user need
+- Logically belong on the same page
+- Share a common topic or theme
+
+For each cluster:
+- Pick the highest-volume keyword as the primary keyword
+- List the rest as secondary keywords
+- Determine content_type: "service_page" for transactional/commercial intent, "blog_post" for informational
+- Calculate a priority_score (0-100) based on: total volume, business value, and competition level
+- Write a brief intent_summary explaining what the searcher wants
+
+Return ONLY a JSON object:
+{{"clusters": [{{"cluster_name": "...", "content_type": "service_page|blog_post", "primary_keyword": "...", "secondary_keywords": ["..."], "total_volume": 1234, "intent_summary": "...", "priority_score": 85}}]}}"""
+
+    raw = _chat(
+        [{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"},
+        task="cluster_keywords",
+    )
+    data = _parse_json(raw)
+    return data.get("clusters", data) if isinstance(data, dict) else data
+
+
+def generate_content_brief(
+    profile: dict,
+    cluster: dict,
+    url_inventory: list[dict],
+) -> dict:
+    """Generate a detailed content brief for a keyword cluster.
+
+    Args:
+        profile: Client profile dict.
+        cluster: Cluster dict from cluster_keywords().
+        url_inventory: Client's URL inventory for internal linking.
+
+    Returns:
+        Dict with brief sections: title, overview, audience, direction, seo, cta.
+    """
+    # Build URL context for internal linking
+    url_lines = "\n".join(
+        f"- {u['url']} | {u.get('title', '')}"
+        for u in url_inventory[:30]
+    )
+
+    secondary_kws = ", ".join(cluster.get("secondary_keywords", [])[:10])
+    content_type = cluster.get("content_type", "blog_post")
+
+    type_guidance = ""
+    if content_type == "service_page":
+        type_guidance = """This is a SERVICE PAGE brief. The content should be:
+- Conversion-focused with clear calls-to-action
+- 800-1,500 words (concise, scannable)
+- Structured around the service offering and client benefits
+- Include trust signals (credentials, experience, results)
+- Local SEO elements if location-specific"""
+    else:
+        type_guidance = """This is a BLOG POST brief. The content should be:
+- Educational and thorough (1,500-2,500 words)
+- Answer the searcher's question comprehensively
+- Establish the client as a thought leader
+- Include practical takeaways the reader can use
+- Link naturally to relevant service pages"""
+
+    prompt = f"""You are a senior content strategist creating a detailed content brief.
+
+CLIENT PROFILE:
+{json.dumps({k: v for k, v in profile.items() if k != "url_inventory"}, indent=2)}
+
+KEYWORD CLUSTER:
+- Primary keyword: {cluster.get("primary_keyword", "")}
+- Secondary keywords: {secondary_kws}
+- Search intent: {cluster.get("intent_summary", "")}
+- Content type: {content_type}
+
+CLIENT'S EXISTING PAGES (for internal linking):
+{url_lines}
+
+{type_guidance}
+
+Create a comprehensive content brief with these sections:
+
+1. OVERVIEW: Working title (compelling, not generic), primary keyword, content type, recommended word count, goal of this content
+
+2. AUDIENCE: Who specifically is searching for this? What problem are they trying to solve? Where are they in the buying journey (awareness/consideration/decision)?
+
+3. CONTENT DIRECTION:
+   - Unique angle: What should make this content different from what already ranks? What can this client offer that competitors can't?
+   - Outline: H2 headings with 1-2 sentence descriptions of what each section should cover
+   - Questions to answer: 3-5 specific questions the content should address
+   - Tone and voice guidance
+
+4. SEO REQUIREMENTS:
+   - Primary keyword placement guidance (title, H1, first paragraph, etc.)
+   - Secondary keywords to weave in naturally (max 8)
+   - Internal links: 3-5 specific URLs from the client's site to link to, with suggested anchor text
+   - Meta title suggestion (under 60 chars)
+   - Meta description suggestion (under 160 chars)
+
+5. CTA: What should the reader do after reading? Be specific to the client's business.
+
+Return ONLY a JSON object:
+{{"title": "...", "overview": {{"working_title": "...", "primary_keyword": "...", "content_type": "...", "word_count": "1,500-2,000", "goal": "..."}}, "audience": {{"who": "...", "problem": "...", "journey_stage": "..."}}, "direction": {{"unique_angle": "...", "outline": [{{"heading": "H2 text", "description": "what to cover"}}], "questions": ["..."], "tone": "..."}}, "seo": {{"keyword_placement": "...", "secondary_keywords": ["..."], "internal_links": [{{"url": "...", "anchor_text": "..."}}], "meta_title": "...", "meta_description": "..."}}, "cta": "..."}}"""
+
+    raw = _chat(
+        [{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"},
+        task="generate_brief",
+    )
+    return _parse_json(raw)
 
 
 def map_keywords(
@@ -326,11 +535,14 @@ For each keyword:
 Rules:
 - Only map if genuine topical match (don't force-fit)
 - Multiple keywords mapping to same URL is fine (keyword clustering)
-- Consider search intent: transactional → service page, informational → blog"""
+- Consider search intent: transactional → service page, informational → blog
+
+Return ONLY a JSON object in this exact format:
+{{"mappings": [{{"keyword": "...", "url": "...|NEW_PAGE|BLOG_POST", "confidence": 0-100, "intent": "...", "notes": "..."}}]}}"""
 
     raw = _chat(
         [{"role": "user", "content": prompt}],
-        response_format=MAPPING_SCHEMA,
+        response_format={"type": "json_object"},
         task="map_keywords",
     )
     data = _parse_json(raw)
@@ -390,6 +602,9 @@ def estimate_cost(num_keywords: int, task_type: str = "cleaning") -> dict:
     if task_type == "cleaning":
         input_per_batch = 3300  # ~800 profile + ~2500 keywords
         output_per_batch = 3000  # structured JSON classifications
+    elif task_type == "briefs":
+        input_per_batch = 4000   # ~800 profile + ~1500 URLs + ~1700 cluster context
+        output_per_batch = 5000  # detailed structured brief JSON
     else:  # mapping
         input_per_batch = 6300  # ~800 profile + ~3000 URLs + ~2500 keywords
         output_per_batch = 4000  # structured JSON mappings
