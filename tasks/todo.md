@@ -205,3 +205,55 @@
   - Brief quality depends on client profile completeness
   - No brief editing/customization UI (export and edit externally)
   - Copy-to-clipboard uses text_area (manual select+copy, not one-click)
+
+---
+
+## Session 5: Negative Keywords Enhancement
+
+### Todo
+
+- [x] 1. **Feature 1: Hard Pre-Filter** — `utils/llm.py`
+  - Add `pre_filter_negatives()` function before `classify_keywords()`
+  - Case-insensitive substring matching against negative keywords list
+  - Returns (pass_through, auto_removed) tuple
+  - Auto-removed get classification=REMOVE, confidence=100, reason="Matched negative keyword: {term}"
+
+- [x] 2. **Feature 1: Pre-Filter Integration** — `pages/keyword_cleaning.py`
+  - Extract negative_terms from profile before batching
+  - Call `pre_filter_negatives()` on full keyword list
+  - Show info message: "X keywords auto-removed by negative keyword filter"
+  - Only send pass_through keywords to LLM batch loop
+  - Merge auto_removed results back into all_results after batches
+
+- [x] 3. **Feature 3: Category-Based Negatives UI** — `pages/client_setup.py`
+  - Add "Negative Categories" text area below existing negative keywords
+  - Caption explaining these are broader AI-interpreted rules
+  - Add `negative_categories` to profile save dict
+
+- [x] 4. **Feature 3: Category Prompt Injection** — `utils/llm.py`
+  - Modify `classify_keywords()` prompt to include negative_categories if present
+  - Add conditional block after existing rules section
+
+- [x] 5. **Feature 2: Suggest Function** — `utils/llm.py`
+  - Add `suggest_negative_keywords()` function
+  - Sends sample keywords + profile to LLM
+  - Returns list of suggested terms with reason + match count
+
+- [x] 6. **Feature 2: Suggester UI** — `pages/keyword_cleaning.py`
+  - Add expander between cost estimate and "Clean Keywords" button
+  - "Analyze keywords for negative terms" button
+  - Display suggestions as checkboxes with term + reason + match count
+  - "Add Selected to Profile" button that saves to profile and updates session state
+
+### Review
+
+- **Summary of changes:**
+  - `utils/llm.py` — Added `pre_filter_negatives()` (deterministic substring filter), `suggest_negative_keywords()` (LLM-powered suggestion), and injected `negative_categories` into `classify_keywords()` prompt
+  - `pages/keyword_cleaning.py` — Pre-filter runs before LLM batching, suggester expander with checkboxes + "Add to Profile" button, info message for filtered count
+  - `pages/client_setup.py` — Added "Negative Categories" text area and saves to profile
+
+- **No new dependencies added**
+
+- **No new environment variables needed**
+
+- **Backward compatibility:** Old profiles without `negative_categories` work fine via `profile.get("negative_categories", [])`

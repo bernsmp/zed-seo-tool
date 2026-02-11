@@ -172,6 +172,16 @@ if profile or client_name:
         help="Any keyword containing these terms will be automatically flagged for removal during cleaning.",
     )
 
+    st.divider()
+    st.subheader("Negative Categories")
+    st.caption("Broader categories the AI should remove — e.g. 'Competitor brands', 'DIY home remedies', 'Unrelated medical specialties'.")
+    negative_categories = st.text_area(
+        "Negative Categories (one per line)",
+        value="\n".join(profile.get("negative_categories", [])),
+        key="edit_neg_categories",
+        help="The AI will interpret these as rules during classification. Use for patterns too broad for individual keywords.",
+    )
+
     # ── Save ─────────────────────────────────────────────────────
 
     if st.button("Save Profile", type="primary"):
@@ -187,6 +197,7 @@ if profile or client_name:
             "specialties": _split_lines(specialties),
             "topics": _split_lines(topics),
             "negative_keywords": _split_lines(negative_keywords),
+            "negative_categories": _split_lines(negative_categories),
             "url_inventory": profile.get("url_inventory", []),
         }
         save_client_profile(slug, updated_profile)

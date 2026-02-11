@@ -9,9 +9,11 @@ from utils.data import (
     load_client_profile,
     load_latest_results,
     parse_keyword_csv,
+    save_client_profile,
     save_results,
+    slugify,
 )
-from utils.llm import classify_keywords, cost_tracker, estimate_cost, generate_qc_summary
+from utils.llm import classify_keywords, cost_tracker, estimate_cost, generate_qc_summary, pre_filter_negatives, suggest_negative_keywords
 from utils.semrush import pull_competitor_keywords, check_api_units, estimate_api_cost
 
 st.markdown("""
@@ -196,6 +198,43 @@ if df is not None and len(df) > 0:
     </div>
     """, unsafe_allow_html=True)
 
+    # ── Negative keyword suggester ─────────────────────────────────
+
+    with st.expander("Suggest Negative Keywords", expanded=False):
+        st.caption("Let the AI scan your keyword list and suggest terms to add as negative keywords.")
+        if st.button("Analyze keywords for negative terms", key="suggest_negatives"):
+            kw_list = df[keyword_col].tolist()
+            with st.spinner("Analyzing keywords..."):
+                try:
+                    suggestions = suggest_negative_keywords(profile, kw_list)
+                    st.session_state._neg_suggestions = suggestions
+                except Exception as e:
+                    st.error(f"Suggestion failed: {e}")
+
+        suggestions = st.session_state.get("_neg_suggestions", [])
+        if suggestions:
+            selected = []
+            for i, s in enumerate(suggestions):
+                checked = st.checkbox(
+                    f"**{s['term']}** — {s.get('reason', '')} ({s.get('matches', '?')} matches)",
+                    key=f"neg_sug_{i}",
+                )
+                if checked:
+                    selected.append(s["term"])
+
+            if selected and st.button("Add Selected to Profile", key="add_neg_to_profile"):
+                existing = profile.get("negative_keywords", [])
+                new_terms = [t for t in selected if t.lower() not in [e.lower() for e in existing]]
+                if new_terms:
+                    profile["negative_keywords"] = existing + new_terms
+                    slug = slugify(profile.get("business_name", profile.get("domain", selected_client)))
+                    save_client_profile(slug, profile)
+                    st.success(f"Added {len(new_terms)} negative keyword(s) to profile: {', '.join(new_terms)}")
+                    st.session_state._neg_suggestions = []
+                    st.rerun()
+                else:
+                    st.info("All selected terms are already in your negative keywords list.")
+
     # ── Batch processing ─────────────────────────────────────────
 
     BATCH_SIZE = 100
@@ -204,30 +243,47 @@ if df is not None and len(df) > 0:
         all_results = []
         anchor_examples = []
 
+        # ── Build full keyword list ──────────────────────────────
+        all_keywords = []
+        for _, row in df.iterrows():
+            kw = {"keyword": row[keyword_col]}
+            if "volume" in df.columns:
+                kw["volume"] = row.get("volume", "")
+            if "keyword difficulty" in df.columns:
+                kw["kd"] = row.get("keyword difficulty", "")
+            elif "kd" in df.columns:
+                kw["kd"] = row.get("kd", "")
+            if "intent" in df.columns:
+                kw["intent"] = row.get("intent", "")
+            all_keywords.append(kw)
+
+        # ── Pre-filter negatives ─────────────────────────────────
+        negative_terms = profile.get("negative_keywords", [])
+        pass_through, auto_removed = pre_filter_negatives(all_keywords, negative_terms)
+
+        if auto_removed:
+            st.info(f"{len(auto_removed)} keywords auto-removed by negative keyword filter.")
+            all_results.extend(auto_removed)
+
+        # Build a filtered DataFrame for batching (only pass_through keywords)
+        if pass_through:
+            filtered_df = pd.DataFrame(pass_through)
+        else:
+            filtered_df = pd.DataFrame(columns=["keyword"])
+
         progress_bar = st.progress(0)
 
         with st.status("Classifying keywords...", expanded=True) as status:
-            total_batches = max(1, (len(df) + BATCH_SIZE - 1) // BATCH_SIZE)
+            total_batches = max(1, (len(filtered_df) + BATCH_SIZE - 1) // BATCH_SIZE) if len(filtered_df) > 0 else 0
 
             for batch_idx in range(total_batches):
                 start = batch_idx * BATCH_SIZE
-                end = min(start + BATCH_SIZE, len(df))
-                batch_df = df.iloc[start:end]
+                end = min(start + BATCH_SIZE, len(filtered_df))
+                batch_df = filtered_df.iloc[start:end]
 
                 st.write(f"Batch {batch_idx + 1}/{total_batches} ({start+1}–{end})...")
 
-                keywords = []
-                for _, row in batch_df.iterrows():
-                    kw = {"keyword": row[keyword_col]}
-                    if "volume" in df.columns:
-                        kw["volume"] = row.get("volume", "")
-                    if "keyword difficulty" in df.columns:
-                        kw["kd"] = row.get("keyword difficulty", "")
-                    elif "kd" in df.columns:
-                        kw["kd"] = row.get("kd", "")
-                    if "intent" in df.columns:
-                        kw["intent"] = row.get("intent", "")
-                    keywords.append(kw)
+                keywords = batch_df.to_dict(orient="records")
 
                 try:
                     batch_results = classify_keywords(
@@ -236,8 +292,8 @@ if df is not None and len(df) > 0:
 
                     for i, result in enumerate(batch_results):
                         row_idx = start + i
-                        if row_idx < len(df):
-                            row_data = df.iloc[row_idx].to_dict()
+                        if row_idx < len(filtered_df):
+                            row_data = filtered_df.iloc[row_idx].to_dict()
                             row_data["classification"] = result.get("classification", "UNSURE")
                             row_data["confidence"] = result.get("confidence", 50)
                             row_data["reason"] = result.get("reason", "")
@@ -252,8 +308,8 @@ if df is not None and len(df) > 0:
                     st.error(f"Batch {batch_idx + 1} failed: {e}")
                     for i in range(len(batch_df)):
                         row_idx = start + i
-                        if row_idx < len(df):
-                            row_data = df.iloc[row_idx].to_dict()
+                        if row_idx < len(filtered_df):
+                            row_data = filtered_df.iloc[row_idx].to_dict()
                             row_data["classification"] = "UNSURE"
                             row_data["confidence"] = 0
                             row_data["reason"] = f"Batch failed: {e}"
@@ -270,7 +326,10 @@ if df is not None and len(df) > 0:
                 if batch_idx < total_batches - 1:
                     time.sleep(1)
 
-            status.update(label=f"Done! Classified {len(all_results)} keywords.", state="complete")
+            if total_batches > 0:
+                status.update(label=f"Done! Classified {len(all_results)} keywords.", state="complete")
+            else:
+                status.update(label=f"All {len(all_results)} keywords handled by negative keyword filter.", state="complete")
 
         # ── Generate QC summary ──────────────────────────────────
         with st.status("Running quality check...", expanded=True):

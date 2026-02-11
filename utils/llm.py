@@ -234,6 +234,87 @@ MAPPING_SCHEMA = {
 # ── Public API ───────────────────────────────────────────────────
 
 
+def pre_filter_negatives(
+    keywords: list[dict], negative_terms: list[str]
+) -> tuple[list[dict], list[dict]]:
+    """Split keywords into (pass_through, auto_removed) based on negative keyword matches.
+
+    Case-insensitive substring match. Auto-removed entries get REMOVE classification
+    with 100% confidence so they can merge directly into results.
+
+    Returns:
+        Tuple of (keywords to send to LLM, auto-removed results with classification data)
+    """
+    if not negative_terms:
+        return keywords, []
+
+    lower_terms = [t.lower() for t in negative_terms]
+    pass_through = []
+    auto_removed = []
+
+    for kw in keywords:
+        kw_lower = kw["keyword"].lower()
+        matched_term = next((t for t in lower_terms if t in kw_lower), None)
+        if matched_term:
+            auto_removed.append({
+                **kw,
+                "classification": "REMOVE",
+                "confidence": 100,
+                "reason": f"Matched negative keyword: {matched_term}",
+            })
+        else:
+            pass_through.append(kw)
+
+    return pass_through, auto_removed
+
+
+def suggest_negative_keywords(profile: dict, keywords: list[str]) -> list[dict]:
+    """Analyze keywords and suggest potential negative terms based on client profile.
+
+    Returns:
+        List of dicts: [{"term": "competitor name", "reason": "Appears to be a competitor brand", "matches": 5}]
+    """
+    # Send a sample of unique keywords (cap at 200 to keep prompt manageable)
+    unique_kws = list(dict.fromkeys(keywords))[:200]
+    keyword_lines = "\n".join(f"- {kw}" for kw in unique_kws)
+
+    existing_negatives = profile.get("negative_keywords", [])
+    existing_text = ", ".join(existing_negatives) if existing_negatives else "None yet"
+
+    prompt = f"""You are an SEO keyword analyst. Analyze this keyword list and suggest terms that should be added as negative keywords (terms to always REMOVE during cleaning).
+
+CLIENT PROFILE:
+- Business: {profile.get('business_name', 'Unknown')}
+- Domain: {profile.get('domain', '')}
+- Services: {', '.join(profile.get('services', [])[:10])}
+- Locations: {', '.join(profile.get('locations', [])[:10])}
+- Existing negative keywords: {existing_text}
+
+KEYWORD SAMPLE ({len(unique_kws)} keywords):
+{keyword_lines}
+
+Look for these patterns:
+- Competitor brand names or doctor names
+- Locations the client does NOT serve
+- Service categories completely unrelated to the client
+- Common irrelevant modifiers (e.g. "DIY", "free", "jobs")
+
+For each suggested term, count how many keywords in the sample contain it.
+Do NOT suggest terms that are already in the existing negative keywords list.
+Only suggest terms that would filter out genuinely irrelevant keywords.
+
+Return ONLY a JSON object:
+{{"suggestions": [{{"term": "competitor name", "reason": "Appears to be a competitor brand", "matches": 5}}]}}"""
+
+    raw = _chat(
+        [{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"},
+        task="suggest_negatives",
+    )
+    data = _parse_json(raw)
+    return data.get("suggestions", []) if isinstance(data, dict) else data
+
+
 def classify_keywords(
     profile: dict,
     keywords: list[dict],
@@ -281,7 +362,16 @@ Rules:
 - Be conservative: UNSURE rather than incorrect REMOVE.
 - Generic single-word terms → REMOVE
 - Location terms for OTHER locations → REMOVE
-- Competitor/doctor names → REMOVE
+- Competitor/doctor names → REMOVE"""
+
+    # Inject negative categories if present
+    if profile.get("negative_categories"):
+        categories_text = "\n".join(f"- {cat}" for cat in profile["negative_categories"])
+        prompt += f"""
+- Also REMOVE keywords matching these categories:
+{categories_text}"""
+
+    prompt += """
 
 Return ONLY a JSON object in this exact format:
 {{"classifications": [{{"keyword": "...", "classification": "KEEP|REMOVE|UNSURE", "confidence": 85, "reason": "brief explanation"}}]}}
