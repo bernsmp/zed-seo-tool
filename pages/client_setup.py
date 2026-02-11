@@ -159,7 +159,7 @@ if profile or client_name:
         "Key Topics (one per line)",
         value="\n".join(profile.get("topics", [])),
         key="edit_topics",
-        help="Broad content topics the client covers (e.g. 'patient acquisition', 'practice growth').",
+        help="Core topics the business is known for — think subject areas, not goals. E.g. 'dental implants', 'cosmetic dentistry', 'teeth whitening'.",
     )
 
     st.divider()
