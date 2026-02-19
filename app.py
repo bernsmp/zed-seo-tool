@@ -360,11 +360,12 @@ client_setup = st.Page("pages/client_setup.py", title="Client Setup", icon="👤
 keyword_cleaning = st.Page("pages/keyword_cleaning.py", title="Keyword Cleaning", icon="🧹")
 keyword_mapping = st.Page("pages/keyword_mapping.py", title="Keyword Mapping", icon="🗺️")
 content_briefs = st.Page("pages/content_briefs.py", title="Content Briefs", icon="📝")
+cwv_audit = st.Page("pages/cwv_audit.py", title="CWV Audit", icon="⚡")
 sow_generator = st.Page("pages/sow_generator.py", title="SOW Generator", icon="📄")
 how_it_works = st.Page("pages/how_it_works.py", title="How It Works", icon="📖")
 
 pg = st.navigation({
-    "SEO": [client_setup, keyword_cleaning, keyword_mapping, content_briefs],
+    "SEO": [client_setup, keyword_cleaning, keyword_mapping, content_briefs, cwv_audit],
     "Sales Ops": [sow_generator],
     "Resources": [how_it_works],
 })
