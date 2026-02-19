@@ -7,8 +7,8 @@ from utils.data import list_clients
 from utils.llm import _model, cost_tracker
 
 st.set_page_config(
-    page_title="Trackable Med · SEO Tool",
-    page_icon="🔍",
+    page_title="TM Studio · TrackableMed",
+    page_icon="⚡",
     layout="wide",
 )
 
@@ -360,10 +360,12 @@ client_setup = st.Page("pages/client_setup.py", title="Client Setup", icon="👤
 keyword_cleaning = st.Page("pages/keyword_cleaning.py", title="Keyword Cleaning", icon="🧹")
 keyword_mapping = st.Page("pages/keyword_mapping.py", title="Keyword Mapping", icon="🗺️")
 content_briefs = st.Page("pages/content_briefs.py", title="Content Briefs", icon="📝")
+sow_generator = st.Page("pages/sow_generator.py", title="SOW Generator", icon="📄")
 how_it_works = st.Page("pages/how_it_works.py", title="How It Works", icon="📖")
 
 pg = st.navigation({
-    "Workflow": [client_setup, keyword_cleaning, keyword_mapping, content_briefs],
+    "SEO": [client_setup, keyword_cleaning, keyword_mapping, content_briefs],
+    "Sales Ops": [sow_generator],
     "Resources": [how_it_works],
 })
 
@@ -380,7 +382,7 @@ if "clients_list" not in st.session_state:
 # ── Sidebar ──────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.caption("SEO KEYWORD TOOL")
+    st.caption("TM STUDIO")
     st.divider()
 
     if st.session_state.clients_list:

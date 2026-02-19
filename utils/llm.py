@@ -34,7 +34,7 @@ def _get_client() -> OpenAI:
             api_key=api_key,
             default_headers={
                 "HTTP-Referer": "http://localhost:8501",
-                "X-Title": "SEO Keyword Tool",
+                "X-Title": "TM Studio",
             },
         )
     return _client
