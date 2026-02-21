@@ -155,10 +155,9 @@
    - During site crawl, flag common issues: missing meta descriptions, duplicate titles, slow pages, broken links
    - Quick wins report
 
-10. **Client Reporting Template**
-    - Auto-generate a PDF/PPTX summary of the keyword research
-    - Stats, key findings, recommendations, next steps
-    - Branded with client logo
+10. **Client Reporting Template** ✅ SHIPPED (2026-02-20 — see Session 6 below)
+    - Databox JPG → branded monthly performance review PDF
+    - Claude Project skill, not TM Studio page (faster to ship, zero adoption friction)
 
 ---
 
@@ -257,3 +256,37 @@
 - **No new environment variables needed**
 
 - **Backward compatibility:** Old profiles without `negative_categories` work fine via `profile.get("negative_categories", [])`
+
+---
+
+## Session 6: TM Monthly Report Generator (2026-02-20)
+
+### Built
+
+- [x] **TM Monthly Report skill** — `skills/orchestration/tm-monthly-report/`
+  - `SKILL.md` — full workflow, brand spec (navy #1B2B5E, inline SVG logo), HTML template, QC checklist, variable sections, kill list
+  - `project-instructions.md` — Claude Project custom instructions for Trinisha's workspace
+  - Commit `42991c2` in max-command-center
+
+### How it works
+
+1. Trinisha downloads Databox JPG (native Download button in Databox)
+2. Uploads to Claude Project (+ optional GA4 screenshot for top pages MoM %)
+3. Claude extracts all metrics, runs QC, flags anything uncertain
+4. Trinisha confirms data + types Recommended Actions
+5. Claude generates branded print-ready report → she saves as PDF from browser
+
+### Known gap / next action
+
+- [ ] **Justin (Zed dev):** Connect GA4 "Pages and screens" to Databox dashboard
+  - One-time setup in Databox interface (~20 min)
+  - Eliminates the GA4 screenshot step permanently
+  - Until then: Trinisha uploads GA4 screenshot or manually types the 5 MoM % values at QC step
+
+### Setup checklist for Trinisha
+
+- [ ] Create Claude Project (claude.ai)
+- [ ] Paste `project-instructions.md` as custom instructions
+- [ ] Upload `SKILL.md` to knowledge files
+- [ ] Upload January 2026 PDF as reference format
+- [ ] Test with a Databox JPG export
