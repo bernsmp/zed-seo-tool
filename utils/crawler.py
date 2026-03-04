@@ -1,22 +1,86 @@
 """
 Site crawler — sitemap discovery + page content extraction via trafilatura.
+Uses a lightweight sitemap parser (requests + xml.etree) instead of
+ultimate-sitemap-parser to avoid file-descriptor exhaustion on Streamlit Cloud.
 """
 
 import json
 import time
+import xml.etree.ElementTree as ET
 from typing import Optional
 
+import requests
 import trafilatura
-from usp.tree import sitemap_tree_for_homepage
+
+_SITEMAP_NS = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+_HEADERS = {"User-Agent": "TM-Studio-Crawler/1.0"}
+_TIMEOUT = 15
+
+
+def _fetch_xml(url: str) -> Optional[ET.Element]:
+    """Fetch and parse an XML sitemap. Returns root element or None."""
+    try:
+        resp = requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
+        resp.raise_for_status()
+        return ET.fromstring(resp.content)
+    except Exception:
+        return None
+
+
+def _extract_urls_from_sitemap(url: str, max_urls: int) -> list[str]:
+    """Recursively extract URLs from a sitemap (handles sitemap indexes)."""
+    root = _fetch_xml(url)
+    if root is None:
+        return []
+
+    urls: list[str] = []
+
+    # Check if this is a sitemap index (contains <sitemap> entries)
+    sitemaps = root.findall(".//sm:sitemap/sm:loc", _SITEMAP_NS)
+    if not sitemaps:
+        # Try without namespace (some sitemaps omit it)
+        sitemaps = root.findall(".//{http://www.sitemaps.org/schemas/sitemap/0.9}sitemap/{http://www.sitemaps.org/schemas/sitemap/0.9}loc")
+    if not sitemaps:
+        sitemaps = [el for el in root.iter() if el.tag.endswith("}loc") and el.getparent().tag.endswith("}sitemap")] if hasattr(ET.Element, "getparent") else []
+
+    if sitemaps:
+        # It's a sitemap index — recurse into each child sitemap
+        for sitemap_loc in sitemaps:
+            if len(urls) >= max_urls:
+                break
+            child_urls = _extract_urls_from_sitemap(
+                sitemap_loc.text.strip(), max_urls - len(urls)
+            )
+            urls.extend(child_urls)
+        return urls[:max_urls]
+
+    # Regular sitemap — extract <url><loc> entries
+    locs = root.findall(".//sm:url/sm:loc", _SITEMAP_NS)
+    if not locs:
+        # Fallback: find any element ending in "loc" inside "url"
+        for el in root.iter():
+            tag = el.tag.split("}")[-1] if "}" in el.tag else el.tag
+            if tag == "loc" and el.text:
+                urls.append(el.text.strip())
+                if len(urls) >= max_urls:
+                    break
+    else:
+        for loc in locs:
+            if loc.text:
+                urls.append(loc.text.strip())
+                if len(urls) >= max_urls:
+                    break
+
+    return urls[:max_urls]
 
 
 def discover_urls(domain: str, max_urls: int = 100) -> list[str]:
     """Discover URLs from a domain via sitemap.
 
-    Tries sitemap_tree_for_homepage which handles:
+    Tries these locations in order:
     - /sitemap.xml
-    - /robots.txt sitemap references
-    - Nested / index sitemaps
+    - /sitemap_index.xml
+    - Sitemap URL from /robots.txt
 
     Returns up to max_urls URLs sorted alphabetically.
     """
@@ -24,13 +88,26 @@ def discover_urls(domain: str, max_urls: int = 100) -> list[str]:
         domain = f"https://{domain}"
     domain = domain.rstrip("/")
 
-    urls = []
+    urls: list[str] = []
+
+    # Try common sitemap locations
+    for path in ["/sitemap.xml", "/sitemap_index.xml"]:
+        urls = _extract_urls_from_sitemap(f"{domain}{path}", max_urls)
+        if urls:
+            return sorted(urls)[:max_urls]
+
+    # Try robots.txt for sitemap references
     try:
-        tree = sitemap_tree_for_homepage(domain)
-        for page in tree.all_pages():
-            urls.append(page.url)
-            if len(urls) >= max_urls:
-                break
+        resp = requests.get(
+            f"{domain}/robots.txt", headers=_HEADERS, timeout=_TIMEOUT
+        )
+        if resp.ok:
+            for line in resp.text.splitlines():
+                if line.lower().startswith("sitemap:"):
+                    sitemap_url = line.split(":", 1)[1].strip()
+                    urls = _extract_urls_from_sitemap(sitemap_url, max_urls)
+                    if urls:
+                        return sorted(urls)[:max_urls]
     except Exception:
         pass
 
