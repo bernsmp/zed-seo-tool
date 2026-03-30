@@ -1,5 +1,8 @@
 """
 Data layer — all file I/O, CSV parsing, client management, and export.
+
+Uses Supabase for persistence when configured (Streamlit Cloud),
+falls back to local filesystem for development.
 """
 
 import json
@@ -9,6 +12,8 @@ from pathlib import Path
 from typing import Optional
 
 import pandas as pd
+
+from utils import db
 
 DATA_DIR = Path(__file__).parent.parent / "data" / "clients"
 
@@ -30,12 +35,24 @@ def _client_dir(slug: str) -> Path:
 
 
 def save_client_profile(slug: str, profile: dict) -> Path:
+    # Always save to Supabase if available
+    if db.is_available():
+        db.save_profile(slug, profile)
+
+    # Also save locally (useful for dev and as cache)
     path = _client_dir(slug) / "profile.json"
     path.write_text(json.dumps(profile, indent=2))
     return path
 
 
 def load_client_profile(slug: str) -> Optional[dict]:
+    # Try Supabase first
+    if db.is_available():
+        profile = db.load_profile(slug)
+        if profile:
+            return profile
+
+    # Fall back to local file
     path = _client_dir(slug) / "profile.json"
     if path.exists():
         return json.loads(path.read_text())
@@ -43,7 +60,14 @@ def load_client_profile(slug: str) -> Optional[dict]:
 
 
 def list_clients() -> list[str]:
-    """Return slugs of all clients that have a profile.json."""
+    """Return slugs of all clients that have a profile."""
+    # Try Supabase first
+    if db.is_available():
+        slugs = db.list_profiles()
+        if slugs:
+            return slugs
+
+    # Fall back to local files
     if not DATA_DIR.exists():
         return []
     return sorted(
@@ -60,6 +84,11 @@ def save_results(slug: str, result_type: str, data: dict) -> Path:
     """Save cleaning or mapping results with timestamp.
     result_type: 'cleaning' or 'mapping'
     """
+    # Save to Supabase if available
+    if db.is_available():
+        db.save_result(slug, result_type, data)
+
+    # Also save locally
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = _client_dir(slug) / f"{result_type}_{ts}.json"
     path.write_text(json.dumps(data, indent=2))
@@ -68,6 +97,13 @@ def save_results(slug: str, result_type: str, data: dict) -> Path:
 
 def load_latest_results(slug: str, result_type: str) -> Optional[dict]:
     """Load most recent results file for a given type."""
+    # Try Supabase first
+    if db.is_available():
+        result = db.load_latest_result(slug, result_type)
+        if result:
+            return result
+
+    # Fall back to local files
     client_dir = _client_dir(slug)
     files = sorted(client_dir.glob(f"{result_type}_*.json"), reverse=True)
     if files:
