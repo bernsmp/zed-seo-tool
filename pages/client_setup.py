@@ -48,10 +48,13 @@ clients = list_clients()
 if clients:
     selected = st.selectbox("Select client to edit, or create new", ["-- New Client --"] + clients)
     if selected != "-- New Client --":
-        profile = load_client_profile(selected)
-        if profile:
-            st.session_state.client_profile = profile
-            st.session_state.client_slug = selected
+        # Only load from disk if we don't already have this client in session
+        # (avoids overwriting freshly-crawled data on Streamlit rerun)
+        if st.session_state.get("client_slug") != selected:
+            profile = load_client_profile(selected)
+            if profile:
+                st.session_state.client_profile = profile
+                st.session_state.client_slug = selected
 else:
     selected = "-- New Client --"
 
@@ -111,6 +114,12 @@ if domain and st.button("Crawl Site & Generate Profile", type="primary"):
                     for p in pages
                 ]
                 st.session_state.client_profile = profile
+
+                # Auto-save to disk so other pages (keyword mapping) can load it immediately
+                auto_slug = slugify(client_name or domain)
+                save_client_profile(auto_slug, profile)
+                st.session_state.client_slug = auto_slug
+
                 status.update(label=f"Done! Crawled {len(pages)} pages.", state="complete")
             except Exception as e:
                 st.error(f"LLM profile generation failed: {e}")
