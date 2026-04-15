@@ -86,7 +86,11 @@ def save_results(slug: str, result_type: str, data: dict) -> Path:
     """
     # Save to Supabase if available
     if db.is_available():
-        db.save_result(slug, result_type, data)
+        try:
+            db.save_result(slug, result_type, data)
+        except Exception as exc:
+            # Keep the app running even if remote persistence is unavailable.
+            print(f"[save_results] Remote save failed for {slug}/{result_type}: {exc}")
 
     # Also save locally
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")

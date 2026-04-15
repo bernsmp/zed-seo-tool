@@ -320,7 +320,7 @@ if df is not None and len(df) > 0:
                 save_results(
                     selected_client,
                     "cleaning",
-                    {"results": all_results, "original_data": df.to_dict(orient="records")},
+                    {"results": all_results},
                 )
 
                 if batch_idx < total_batches - 1:
@@ -342,7 +342,6 @@ if df is not None and len(df) > 0:
                     "cleaning",
                     {
                         "results": all_results,
-                        "original_data": df.to_dict(orient="records"),
                         "qc_summary": qc,
                     },
                 )
