@@ -61,7 +61,25 @@ if not clients:
     """, unsafe_allow_html=True)
     st.stop()
 
-selected_client = st.selectbox("Select Client", clients)
+active_client = st.session_state.get("active_client")
+default_index = clients.index(active_client) if active_client in clients else 0
+selected_client = st.selectbox("Select Client", clients, index=default_index, key="cleaning_client")
+
+if st.session_state.get("_cleaning_active_client") != selected_client:
+    # Keep uploaded/input/result state scoped to the selected client. Without this,
+    # Streamlit can keep showing a prior client's keyword-cleaning results.
+    for key in [
+        "cleaning_results",
+        "cleaning_qc",
+        "cleaning_meta",
+        "_cleaning_semrush_df",
+        "_cleaning_pasted_df",
+        "_neg_suggestions",
+    ]:
+        st.session_state.pop(key, None)
+    st.session_state._cleaning_active_client = selected_client
+    st.session_state.cleaning_results_client = selected_client
+
 profile = load_client_profile(selected_client)
 if not profile:
     st.error("Could not load client profile.")
@@ -71,12 +89,20 @@ st.success(f"Client: **{profile.get('business_name', selected_client)}**")
 
 # ── Auto-load saved results if they exist ────────────────────────
 
-if "cleaning_results" not in st.session_state or not st.session_state.cleaning_results:
+if (
+    st.session_state.get("cleaning_results_client") != selected_client
+    or "cleaning_results" not in st.session_state
+):
     saved = load_latest_results(selected_client, "cleaning")
     if saved and saved.get("results"):
         st.session_state.cleaning_results = saved["results"]
-        if saved.get("qc_summary"):
-            st.session_state.cleaning_qc = saved["qc_summary"]
+        st.session_state.cleaning_qc = saved.get("qc_summary")
+        st.session_state.cleaning_meta = saved.get("meta", {})
+    else:
+        st.session_state.cleaning_results = []
+        st.session_state.cleaning_qc = None
+        st.session_state.cleaning_meta = {}
+    st.session_state.cleaning_results_client = selected_client
 
 # ── Keyword input ────────────────────────────────────────────────
 
@@ -93,14 +119,14 @@ with input_tab_semrush:
         competitor_domain = st.text_input(
             "Competitor Domain",
             placeholder="competitor.com",
-            key="semrush_competitor",
+            key=f"semrush_competitor_{selected_client}",
             help="Enter a competitor's domain to pull their organic keywords. These are keywords they rank for that you might want to target.",
         )
     with col_sr2:
         sr_database = st.selectbox(
             "Database",
             ["us", "uk", "ca", "au", "de", "fr", "es", "it", "br", "in"],
-            key="semrush_db",
+            key=f"semrush_db_{selected_client}",
             help="Regional Google database to pull keywords from.",
         )
 
@@ -110,7 +136,7 @@ with input_tab_semrush:
         max_value=2000,
         value=500,
         step=50,
-        key="semrush_limit",
+        key=f"semrush_limit_{selected_client}",
         help="Number of keywords to pull. Each keyword costs 10 SEMRush API units.",
     )
 
@@ -122,7 +148,7 @@ with input_tab_semrush:
     </div>
     """, unsafe_allow_html=True)
 
-    if competitor_domain and st.button("Pull Keywords from SEMRush", type="primary", key="pull_semrush"):
+    if competitor_domain and st.button("Pull Keywords from SEMRush", type="primary", key=f"pull_semrush_{selected_client}"):
         with st.status("Pulling keywords from SEMRush...", expanded=True) as status:
             try:
                 # Check API units first (may return -1 if check unavailable)
@@ -150,7 +176,7 @@ with input_tab_semrush:
 
 with input_tab_csv:
     st.caption("Upload a keyword gap CSV from any SEO tool. Needs a 'keyword' column — volume, KD, and intent are optional.")
-    uploaded = st.file_uploader("Choose CSV file", type=["csv"], key="cleaning_csv")
+    uploaded = st.file_uploader("Choose CSV file", type=["csv"], key=f"cleaning_csv_{selected_client}")
     if uploaded is not None:
         try:
             df = parse_keyword_csv(uploaded)
@@ -162,10 +188,10 @@ with input_tab_paste:
     pasted = st.text_area(
         "Paste keywords (one per line)",
         height=200,
-        key="cleaning_paste",
+        key=f"cleaning_paste_{selected_client}",
         placeholder="spine surgery near me\nbest orthopedic surgeon\nmedical marketing agency",
     )
-    if pasted.strip() and st.button("Use These Keywords", key="use_pasted"):
+    if pasted.strip() and st.button("Use These Keywords", key=f"use_pasted_{selected_client}"):
         lines = [line.strip() for line in pasted.strip().split("\n") if line.strip()]
         df = pd.DataFrame({"keyword": lines})
         st.session_state._cleaning_pasted_df = df
@@ -202,7 +228,7 @@ if df is not None and len(df) > 0:
 
     with st.expander("Suggest Negative Keywords", expanded=False):
         st.caption("Let the AI scan your keyword list and suggest terms to add as negative keywords.")
-        if st.button("Analyze keywords for negative terms", key="suggest_negatives"):
+        if st.button("Analyze keywords for negative terms", key=f"suggest_negatives_{selected_client}"):
             kw_list = df[keyword_col].tolist()
             with st.spinner("Analyzing keywords..."):
                 try:
@@ -217,12 +243,12 @@ if df is not None and len(df) > 0:
             for i, s in enumerate(suggestions):
                 checked = st.checkbox(
                     f"**{s['term']}** — {s.get('reason', '')} ({s.get('matches', '?')} matches)",
-                    key=f"neg_sug_{i}",
+                    key=f"neg_sug_{selected_client}_{i}",
                 )
                 if checked:
                     selected.append(s["term"])
 
-            if selected and st.button("Add Selected to Profile", key="add_neg_to_profile"):
+            if selected and st.button("Add Selected to Profile", key=f"add_neg_to_profile_{selected_client}"):
                 existing = profile.get("negative_keywords", [])
                 new_terms = [t for t in selected if t.lower() not in [e.lower() for e in existing]]
                 if new_terms:
@@ -239,9 +265,17 @@ if df is not None and len(df) > 0:
 
     BATCH_SIZE = 100
 
-    if st.button("Clean Keywords", type="primary"):
+    if st.button("Clean Keywords", type="primary", key=f"clean_keywords_{selected_client}"):
         all_results = []
         anchor_examples = []
+        st.session_state.cleaning_results = []
+        st.session_state.cleaning_qc = None
+        st.session_state.cleaning_meta = {
+            "client_slug": selected_client,
+            "client_business_name": profile.get("business_name", selected_client),
+            "completed": False,
+        }
+        st.session_state.cleaning_results_client = selected_client
 
         # ── Build full keyword list ──────────────────────────────
         all_keywords = []
@@ -275,13 +309,17 @@ if df is not None and len(df) > 0:
 
         with st.status("Classifying keywords...", expanded=True) as status:
             total_batches = max(1, (len(filtered_df) + BATCH_SIZE - 1) // BATCH_SIZE) if len(filtered_df) > 0 else 0
+            batch_status = st.empty()
 
             for batch_idx in range(total_batches):
                 start = batch_idx * BATCH_SIZE
                 end = min(start + BATCH_SIZE, len(filtered_df))
                 batch_df = filtered_df.iloc[start:end]
 
-                st.write(f"Batch {batch_idx + 1}/{total_batches} ({start+1}–{end})...")
+                batch_status.write(
+                    f"Batch {batch_idx + 1}/{total_batches} "
+                    f"({start + 1}-{end}) | {len(all_results):,} results saved"
+                )
 
                 keywords = batch_df.to_dict(orient="records")
 
@@ -317,16 +355,29 @@ if df is not None and len(df) > 0:
 
                 progress_bar.progress((batch_idx + 1) / total_batches)
 
+                checkpoint_meta = {
+                    "client_slug": selected_client,
+                    "client_business_name": profile.get("business_name", selected_client),
+                    "source_keyword_count": len(df),
+                    "auto_removed_count": len(auto_removed),
+                    "llm_keyword_count": len(filtered_df),
+                    "processed_batches": batch_idx + 1,
+                    "total_batches": total_batches,
+                    "completed": False,
+                }
                 save_results(
                     selected_client,
                     "cleaning",
-                    {"results": all_results},
+                    {"results": all_results, "meta": checkpoint_meta},
                 )
+                st.session_state.cleaning_results = all_results
+                st.session_state.cleaning_meta = checkpoint_meta
 
                 if batch_idx < total_batches - 1:
                     time.sleep(1)
 
             if total_batches > 0:
+                batch_status.success(f"Classified {len(all_results):,} keywords across {total_batches} batches.")
                 status.update(label=f"Done! Classified {len(all_results)} keywords.", state="complete")
             else:
                 status.update(label=f"All {len(all_results)} keywords handled by negative keyword filter.", state="complete")
@@ -337,14 +388,21 @@ if df is not None and len(df) > 0:
                 qc = generate_qc_summary(profile, all_results)
                 st.session_state.cleaning_qc = qc
                 # Re-save with QC
+                final_meta = {
+                    **st.session_state.get("cleaning_meta", {}),
+                    "processed_batches": st.session_state.get("cleaning_meta", {}).get("total_batches", 0),
+                    "completed": True,
+                }
                 save_results(
                     selected_client,
                     "cleaning",
                     {
                         "results": all_results,
                         "qc_summary": qc,
+                        "meta": final_meta,
                     },
                 )
+                st.session_state.cleaning_meta = final_meta
             except Exception as e:
                 st.warning(f"QC summary generation failed: {e}")
 
@@ -358,6 +416,14 @@ if not results:
     st.stop()
 
 results_df = pd.DataFrame(results)
+meta = st.session_state.get("cleaning_meta", {})
+if meta and meta.get("client_slug") == selected_client and not meta.get("completed", True):
+    st.warning(
+        "Showing a partial checkpoint for "
+        f"**{meta.get('client_business_name', selected_client)}**: "
+        f"batch {meta.get('processed_batches', '?')}/{meta.get('total_batches', '?')} saved. "
+        "Run cleaning again to continue from the source CSV and produce a completed export."
+    )
 
 # Ensure confidence column exists
 if "confidence" not in results_df.columns:
@@ -539,9 +605,10 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-if st.button("Clear Results & Start Over"):
+if st.button("Clear Results & Start Over", key=f"clear_cleaning_{selected_client}"):
     st.session_state.cleaning_results = []
     st.session_state.cleaning_qc = None
+    st.session_state.cleaning_meta = {}
     if "_cleaning_pasted_df" in st.session_state:
         del st.session_state._cleaning_pasted_df
     st.rerun()
