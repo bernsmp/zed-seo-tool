@@ -119,3 +119,14 @@ def load_latest_result(slug: str, result_type: str) -> Optional[dict]:
     if rows:
         return json.loads(rows[0]["data"])
     return None
+
+
+def load_recent_results(slug: str, result_type: str, limit: int = 25) -> list[dict]:
+    """Load recent results for a client + type, newest first."""
+    rows = _query(
+        """SELECT data FROM results
+           WHERE client_slug = ? AND result_type = ?
+           ORDER BY created_at DESC LIMIT ?""",
+        [slug, result_type, limit],
+    )
+    return [json.loads(row["data"]) for row in rows]

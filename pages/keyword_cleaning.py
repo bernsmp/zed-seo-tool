@@ -265,17 +265,22 @@ if df is not None and len(df) > 0:
 
     BATCH_SIZE = 100
 
-    if st.button("Clean Keywords", type="primary", key=f"clean_keywords_{selected_client}"):
-        all_results = []
-        anchor_examples = []
-        st.session_state.cleaning_results = []
-        st.session_state.cleaning_qc = None
-        st.session_state.cleaning_meta = {
-            "client_slug": selected_client,
-            "client_business_name": profile.get("business_name", selected_client),
-            "completed": False,
-        }
-        st.session_state.cleaning_results_client = selected_client
+    current_meta = st.session_state.get("cleaning_meta", {})
+    partial_checkpoint = (
+        current_meta
+        and current_meta.get("client_slug") == selected_client
+        and not current_meta.get("completed", True)
+    )
+    button_label = "Clean Keywords"
+    if partial_checkpoint:
+        processed = current_meta.get("processed_batches")
+        total = current_meta.get("total_batches")
+        if isinstance(processed, int) and isinstance(total, int) and processed < total:
+            button_label = f"Resume Cleaning from Batch {processed + 1}"
+        else:
+            button_label = "Resume Cleaning"
+
+    if st.button(button_label, type="primary", key=f"clean_keywords_{selected_client}"):
 
         # ── Build full keyword list ──────────────────────────────
         all_keywords = []
@@ -297,7 +302,6 @@ if df is not None and len(df) > 0:
 
         if auto_removed:
             st.info(f"{len(auto_removed)} keywords auto-removed by negative keyword filter.")
-            all_results.extend(auto_removed)
 
         # Build a filtered DataFrame for batching (only pass_through keywords)
         if pass_through:
@@ -305,13 +309,72 @@ if df is not None and len(df) > 0:
         else:
             filtered_df = pd.DataFrame(columns=["keyword"])
 
+        total_batches = max(1, (len(filtered_df) + BATCH_SIZE - 1) // BATCH_SIZE) if len(filtered_df) > 0 else 0
+        existing_meta = st.session_state.get("cleaning_meta", {})
+        existing_results = st.session_state.get("cleaning_results", [])
+        processed_batches = existing_meta.get("processed_batches")
+        checkpoint_matches_source = (
+            existing_results
+            and existing_meta.get("client_slug") == selected_client
+            and not existing_meta.get("completed", True)
+            and existing_meta.get("source_keyword_count") == len(df)
+            and existing_meta.get("auto_removed_count") == len(auto_removed)
+            and existing_meta.get("llm_keyword_count") == len(filtered_df)
+            and isinstance(processed_batches, int)
+            and 0 <= processed_batches <= total_batches
+        )
+
+        if checkpoint_matches_source:
+            all_results = list(existing_results)
+            start_batch_idx = processed_batches
+            if start_batch_idx < total_batches:
+                st.info(f"Resuming from batch {start_batch_idx + 1} of {total_batches}.")
+            else:
+                st.info("All batches were already checkpointed. Running the final quality check now.")
+        else:
+            all_results = []
+            start_batch_idx = 0
+            if partial_checkpoint:
+                st.warning(
+                    "The saved checkpoint does not match the keyword source currently loaded. "
+                    "Starting from batch 1."
+                )
+            all_results.extend(auto_removed)
+
+        anchor_examples = []
+        seen_anchor_categories = set()
+        for result in all_results:
+            category = result.get("classification")
+            if category in ["KEEP", "REMOVE", "UNSURE"] and category not in seen_anchor_categories:
+                anchor_examples.append(result)
+                seen_anchor_categories.add(category)
+            if len(anchor_examples) >= 3:
+                break
+
+        st.session_state.cleaning_results = all_results
+        st.session_state.cleaning_qc = None
+        st.session_state.cleaning_meta = {
+            "client_slug": selected_client,
+            "client_business_name": profile.get("business_name", selected_client),
+            "source_keyword_count": len(df),
+            "auto_removed_count": len(auto_removed),
+            "llm_keyword_count": len(filtered_df),
+            "processed_batches": start_batch_idx,
+            "total_batches": total_batches,
+            "completed": False,
+        }
+        st.session_state.cleaning_results_client = selected_client
+
         progress_bar = st.progress(0)
+        if total_batches:
+            progress_bar.progress(start_batch_idx / total_batches)
 
         with st.status("Classifying keywords...", expanded=True) as status:
-            total_batches = max(1, (len(filtered_df) + BATCH_SIZE - 1) // BATCH_SIZE) if len(filtered_df) > 0 else 0
             batch_status = st.empty()
+            if start_batch_idx >= total_batches and total_batches > 0:
+                batch_status.success(f"All {total_batches} batches were already checkpointed.")
 
-            for batch_idx in range(total_batches):
+            for batch_idx in range(start_batch_idx, total_batches):
                 start = batch_idx * BATCH_SIZE
                 end = min(start + BATCH_SIZE, len(filtered_df))
                 batch_df = filtered_df.iloc[start:end]
@@ -422,7 +485,7 @@ if meta and meta.get("client_slug") == selected_client and not meta.get("complet
         "Showing a partial checkpoint for "
         f"**{meta.get('client_business_name', selected_client)}**: "
         f"batch {meta.get('processed_batches', '?')}/{meta.get('total_batches', '?')} saved. "
-        "Run cleaning again to continue from the source CSV and produce a completed export."
+        "Load the same keyword source, then use the resume button to continue from the next batch."
     )
 
 # Ensure confidence column exists

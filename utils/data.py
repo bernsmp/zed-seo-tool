@@ -80,6 +80,40 @@ def list_clients() -> list[str]:
 # --- Results (cleaning / mapping) ---
 
 
+def _select_best_cleaning_result(results: list[dict]) -> Optional[dict]:
+    """Prefer completed results, or the most advanced partial checkpoint for the latest source."""
+    if not results:
+        return None
+
+    latest = results[0]
+    latest_meta = latest.get("meta", {})
+    if latest_meta.get("completed") or latest.get("qc_summary"):
+        return latest
+
+    source_fields = [
+        "source_keyword_count",
+        "auto_removed_count",
+        "llm_keyword_count",
+        "total_batches",
+    ]
+    latest_source = tuple(latest_meta.get(field) for field in source_fields)
+    has_source_meta = all(value is not None for value in latest_source)
+
+    candidates = []
+    for result in results:
+        meta = result.get("meta", {})
+        if meta.get("completed", True):
+            continue
+        if has_source_meta and tuple(meta.get(field) for field in source_fields) != latest_source:
+            continue
+        candidates.append(result)
+
+    if not candidates:
+        return latest
+
+    return max(candidates, key=lambda result: result.get("meta", {}).get("processed_batches", 0))
+
+
 def save_results(slug: str, result_type: str, data: dict) -> Path:
     """Save cleaning or mapping results with timestamp.
     result_type: 'cleaning' or 'mapping'
@@ -103,7 +137,10 @@ def load_latest_results(slug: str, result_type: str) -> Optional[dict]:
     """Load most recent results file for a given type."""
     # Try Supabase first
     if db.is_available():
-        result = db.load_latest_result(slug, result_type)
+        if result_type == "cleaning":
+            result = _select_best_cleaning_result(db.load_recent_results(slug, result_type))
+        else:
+            result = db.load_latest_result(slug, result_type)
         if result:
             return result
 
@@ -111,6 +148,9 @@ def load_latest_results(slug: str, result_type: str) -> Optional[dict]:
     client_dir = _client_dir(slug)
     files = sorted(client_dir.glob(f"{result_type}_*.json"), reverse=True)
     if files:
+        if result_type == "cleaning":
+            recent_results = [json.loads(path.read_text()) for path in files[:25]]
+            return _select_best_cleaning_result(recent_results)
         return json.loads(files[0].read_text())
     return None
 
