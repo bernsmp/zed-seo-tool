@@ -62,7 +62,20 @@ if not clients:
     """, unsafe_allow_html=True)
     st.stop()
 
-selected_client = st.selectbox("Select Client", clients, key="mapping_client")
+active_client = st.session_state.get("active_client")
+default_index = clients.index(active_client) if active_client in clients else 0
+selected_client = st.selectbox("Select Client", clients, index=default_index, key="mapping_client")
+
+if st.session_state.get("_mapping_active_client") != selected_client:
+    for key in [
+        "mapping_results",
+        "mapping_meta",
+        "_mapping_pasted_df",
+    ]:
+        st.session_state.pop(key, None)
+    st.session_state._mapping_active_client = selected_client
+    st.session_state.mapping_results_client = selected_client
+
 profile = load_client_profile(selected_client)
 if not profile:
     st.error("Could not load client profile.")
@@ -84,10 +97,18 @@ st.caption(f"{len(url_inventory)} URLs available from client profile.")
 
 # ── Auto-load saved results if they exist ────────────────────────
 
-if "mapping_results" not in st.session_state or not st.session_state.mapping_results:
+if (
+    st.session_state.get("mapping_results_client") != selected_client
+    or "mapping_results" not in st.session_state
+):
     saved = load_latest_results(selected_client, "mapping")
     if saved and saved.get("results"):
         st.session_state.mapping_results = saved["results"]
+        st.session_state.mapping_meta = saved.get("meta", {})
+    else:
+        st.session_state.mapping_results = []
+        st.session_state.mapping_meta = {}
+    st.session_state.mapping_results_client = selected_client
 
 # ── Keyword input ────────────────────────────────────────────────
 
@@ -98,12 +119,12 @@ df = None
 
 with input_tab_csv:
     st.caption("Upload the cleaned keywords from Keyword Cleaning, or any CSV with a keyword column.")
-    uploaded = st.file_uploader("Choose CSV file", type=["csv"], key="mapping_csv")
+    uploaded = st.file_uploader("Choose CSV file", type=["csv"], key=f"mapping_csv_{selected_client}")
 
     # Optional second CSV
     with st.expander("Optional: Upload additional raw research keywords"):
         uploaded_extra = st.file_uploader(
-            "Additional keywords CSV", type=["csv"], key="mapping_extra_csv"
+            "Additional keywords CSV", type=["csv"], key=f"mapping_extra_csv_{selected_client}"
         )
 
     if uploaded is not None:
@@ -120,10 +141,10 @@ with input_tab_paste:
     pasted = st.text_area(
         "Paste keywords (one per line)",
         height=200,
-        key="mapping_paste",
+        key=f"mapping_paste_{selected_client}",
         placeholder="spine surgery near me\nbest orthopedic surgeon\nmedical marketing agency",
     )
-    if pasted.strip() and st.button("Use These Keywords", key="use_pasted_mapping"):
+    if pasted.strip() and st.button("Use These Keywords", key=f"use_pasted_mapping_{selected_client}"):
         lines = [line.strip() for line in pasted.strip().split("\n") if line.strip()]
         df = pd.DataFrame({"keyword": lines})
         st.session_state._mapping_pasted_df = df
@@ -160,20 +181,98 @@ if df is not None and len(df) > 0:
 
     BATCH_SIZE = 100
 
-    if st.button("Map Keywords", type="primary"):
-        all_results = []
+    current_meta = st.session_state.get("mapping_meta", {})
+    current_results = st.session_state.get("mapping_results", [])
+    legacy_partial_checkpoint = (
+        current_results
+        and not current_meta
+        and len(current_results) < len(df)
+    )
+    partial_checkpoint = (
+        current_meta
+        and current_meta.get("client_slug") == selected_client
+        and not current_meta.get("completed", True)
+    )
+    button_label = "Map Keywords"
+    if partial_checkpoint:
+        processed = current_meta.get("processed_batches")
+        total = current_meta.get("total_batches")
+        if isinstance(processed, int) and isinstance(total, int) and processed < total:
+            button_label = f"Resume Mapping from Batch {processed + 1}"
+        else:
+            button_label = "Resume Mapping"
+    elif legacy_partial_checkpoint:
+        next_batch = (len(current_results) // BATCH_SIZE) + 1
+        button_label = f"Resume Mapping from Batch {next_batch}"
+
+    if st.button(button_label, type="primary", key=f"map_keywords_{selected_client}"):
+        total_batches = max(1, (len(df) + BATCH_SIZE - 1) // BATCH_SIZE)
+        existing_meta = st.session_state.get("mapping_meta", {})
+        existing_results = st.session_state.get("mapping_results", [])
+        processed_batches = existing_meta.get("processed_batches")
+        checkpoint_matches_source = (
+            existing_results
+            and existing_meta.get("client_slug") == selected_client
+            and not existing_meta.get("completed", True)
+            and existing_meta.get("source_keyword_count") == len(df)
+            and existing_meta.get("total_batches") == total_batches
+            and isinstance(processed_batches, int)
+            and 0 <= processed_batches <= total_batches
+        )
+        legacy_checkpoint_matches_source = (
+            existing_results
+            and not existing_meta
+            and len(existing_results) < len(df)
+        )
+
+        if checkpoint_matches_source:
+            all_results = list(existing_results)
+            start_batch_idx = processed_batches
+            if start_batch_idx < total_batches:
+                st.info(f"Resuming from batch {start_batch_idx + 1} of {total_batches}.")
+            else:
+                st.info("All batches were already checkpointed.")
+        elif legacy_checkpoint_matches_source:
+            start_batch_idx = min(len(existing_results) // BATCH_SIZE, total_batches)
+            all_results = list(existing_results[: start_batch_idx * BATCH_SIZE])
+            st.info(f"Resuming from batch {start_batch_idx + 1} of {total_batches}.")
+        else:
+            all_results = []
+            start_batch_idx = 0
+            if partial_checkpoint or legacy_partial_checkpoint:
+                st.warning(
+                    "The saved mapping checkpoint does not match the keyword source currently loaded. "
+                    "Starting from batch 1."
+                )
+
+        st.session_state.mapping_results = all_results
+        st.session_state.mapping_meta = {
+            "client_slug": selected_client,
+            "client_business_name": profile.get("business_name", selected_client),
+            "source_keyword_count": len(df),
+            "processed_batches": start_batch_idx,
+            "total_batches": total_batches,
+            "completed": False,
+        }
+        st.session_state.mapping_results_client = selected_client
 
         progress_bar = st.progress(0)
+        progress_bar.progress(start_batch_idx / total_batches)
 
         with st.status("Mapping keywords to URLs...", expanded=True) as status:
-            total_batches = max(1, (len(df) + BATCH_SIZE - 1) // BATCH_SIZE)
+            batch_status = st.empty()
+            if start_batch_idx >= total_batches:
+                batch_status.success(f"All {total_batches} batches were already checkpointed.")
 
-            for batch_idx in range(total_batches):
+            for batch_idx in range(start_batch_idx, total_batches):
                 start = batch_idx * BATCH_SIZE
                 end = min(start + BATCH_SIZE, len(df))
                 batch_df = df.iloc[start:end]
 
-                st.write(f"Batch {batch_idx + 1}/{total_batches} ({start+1}–{end})...")
+                batch_status.write(
+                    f"Batch {batch_idx + 1}/{total_batches} "
+                    f"({start + 1}-{end}) | {len(all_results):,} results saved"
+                )
 
                 keywords = []
                 for _, row in batch_df.iterrows():
@@ -218,12 +317,30 @@ if df is not None and len(df) > 0:
 
                 progress_bar.progress((batch_idx + 1) / total_batches)
 
+                checkpoint_meta = {
+                    "client_slug": selected_client,
+                    "client_business_name": profile.get("business_name", selected_client),
+                    "source_keyword_count": len(df),
+                    "processed_batches": batch_idx + 1,
+                    "total_batches": total_batches,
+                    "completed": False,
+                }
+
                 # Auto-save after each batch
-                save_results(selected_client, "mapping", {"results": all_results})
+                save_results(selected_client, "mapping", {"results": all_results, "meta": checkpoint_meta})
+                st.session_state.mapping_results = all_results
+                st.session_state.mapping_meta = checkpoint_meta
 
                 if batch_idx < total_batches - 1:
                     time.sleep(1)
 
+            final_meta = {
+                **st.session_state.get("mapping_meta", {}),
+                "processed_batches": total_batches,
+                "completed": True,
+            }
+            save_results(selected_client, "mapping", {"results": all_results, "meta": final_meta})
+            st.session_state.mapping_meta = final_meta
             status.update(label=f"Done! Mapped {len(all_results)} keywords.", state="complete")
 
         st.session_state.mapping_results = all_results
@@ -236,6 +353,14 @@ if not results:
     st.stop()
 
 results_df = pd.DataFrame(results)
+meta = st.session_state.get("mapping_meta", {})
+if meta and meta.get("client_slug") == selected_client and not meta.get("completed", True):
+    st.warning(
+        "Showing a partial mapping checkpoint for "
+        f"**{meta.get('client_business_name', selected_client)}**: "
+        f"batch {meta.get('processed_batches', '?')}/{meta.get('total_batches', '?')} saved. "
+        "Load the same keyword source, then use the resume button to continue from the next batch."
+    )
 
 # Ensure confidence column exists
 if "confidence" not in results_df.columns:
@@ -362,6 +487,7 @@ st.markdown("""
 # Clear results button
 if st.button("Clear Results & Start Over"):
     st.session_state.mapping_results = []
+    st.session_state.mapping_meta = {}
     if "_mapping_pasted_df" in st.session_state:
         del st.session_state._mapping_pasted_df
     st.rerun()

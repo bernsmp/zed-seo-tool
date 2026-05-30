@@ -114,6 +114,41 @@ def _select_best_cleaning_result(results: list[dict]) -> Optional[dict]:
     return max(candidates, key=lambda result: result.get("meta", {}).get("processed_batches", 0))
 
 
+def _select_best_mapping_result(results: list[dict]) -> Optional[dict]:
+    """Prefer the most advanced active mapping checkpoint for the latest source."""
+    if not results:
+        return None
+
+    latest = results[0]
+    latest_meta = latest.get("meta", {})
+    if latest_meta.get("completed"):
+        return latest
+
+    source_fields = ["source_keyword_count", "total_batches"]
+    latest_source = tuple(latest_meta.get(field) for field in source_fields)
+    has_source_meta = all(value is not None for value in latest_source)
+
+    candidates = []
+    for result in results:
+        meta = result.get("meta", {})
+        if meta.get("completed", False):
+            continue
+        if has_source_meta and tuple(meta.get(field) for field in source_fields) != latest_source:
+            continue
+        candidates.append(result)
+
+    if not candidates:
+        return latest
+
+    return max(
+        candidates,
+        key=lambda result: (
+            result.get("meta", {}).get("processed_batches", 0),
+            len(result.get("results", [])),
+        ),
+    )
+
+
 def save_results(slug: str, result_type: str, data: dict) -> Path:
     """Save cleaning or mapping results with timestamp.
     result_type: 'cleaning' or 'mapping'
@@ -139,6 +174,8 @@ def load_latest_results(slug: str, result_type: str) -> Optional[dict]:
     if db.is_available():
         if result_type == "cleaning":
             result = _select_best_cleaning_result(db.load_recent_results(slug, result_type))
+        elif result_type == "mapping":
+            result = _select_best_mapping_result(db.load_recent_results(slug, result_type))
         else:
             result = db.load_latest_result(slug, result_type)
         if result:
@@ -151,6 +188,9 @@ def load_latest_results(slug: str, result_type: str) -> Optional[dict]:
         if result_type == "cleaning":
             recent_results = [json.loads(path.read_text()) for path in files[:25]]
             return _select_best_cleaning_result(recent_results)
+        if result_type == "mapping":
+            recent_results = [json.loads(path.read_text()) for path in files[:25]]
+            return _select_best_mapping_result(recent_results)
         return json.loads(files[0].read_text())
     return None
 
