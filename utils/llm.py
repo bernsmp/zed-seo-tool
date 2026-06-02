@@ -51,6 +51,19 @@ def _model() -> str:
     return os.getenv("DEFAULT_LLM_MODEL", "anthropic/claude-haiku-4.5")
 
 
+def _fallback_models() -> list[str]:
+    fallback_env = os.getenv(
+        "DEFAULT_LLM_FALLBACK_MODELS",
+        "google/gemini-2.5-flash,moonshotai/kimi-k2",
+    )
+    return [model.strip() for model in fallback_env.split(",") if model.strip()]
+
+
+def _model_chain() -> list[str]:
+    models = [_model(), *_fallback_models()]
+    return list(dict.fromkeys(models))
+
+
 # ── Pricing table ($ per 1M tokens on OpenRouter) ───────────────
 
 MODEL_PRICING = {
@@ -128,6 +141,18 @@ def _is_retryable_llm_error(exc: BaseException) -> bool:
     return False
 
 
+def _should_try_fallback_model(exc: BaseException) -> bool:
+    if isinstance(exc, RetryError):
+        last_exc = exc.last_attempt.exception()
+        if last_exc is not None:
+            exc = last_exc
+
+    if isinstance(exc, APIStatusError):
+        return exc.status_code not in {401, 402, 403}
+
+    return isinstance(exc, (APIConnectionError, APITimeoutError))
+
+
 def _extract_api_error_message(exc: APIStatusError) -> str:
     body = getattr(exc, "body", None)
     message = ""
@@ -173,9 +198,13 @@ def format_llm_error(exc: BaseException) -> str:
     retry=retry_if_exception(_is_retryable_llm_error),
     reraise=True,
 )
-def _chat(messages: list[dict], response_format: Optional[dict] = None, task: str = "") -> str:
-    """Single LLM call with retry. Returns raw content string."""
-    model = _model()
+def _chat_with_model(
+    model: str,
+    messages: list[dict],
+    response_format: Optional[dict] = None,
+    task: str = "",
+) -> str:
+    """Single-model LLM call with retry. Returns raw content string."""
     kwargs = {
         "model": model,
         "messages": messages,
@@ -196,6 +225,28 @@ def _chat(messages: list[dict], response_format: Optional[dict] = None, task: st
         )
 
     return resp.choices[0].message.content
+
+
+def _chat(messages: list[dict], response_format: Optional[dict] = None, task: str = "") -> str:
+    """LLM call with model fallback. Returns raw content string."""
+    errors = []
+    models = _model_chain()
+
+    for idx, model in enumerate(models):
+        try:
+            return _chat_with_model(model, messages, response_format=response_format, task=task)
+        except Exception as exc:
+            error_message = format_llm_error(exc)
+            errors.append(f"{model}: {error_message}")
+
+            has_fallback = idx < len(models) - 1
+            if has_fallback and _should_try_fallback_model(exc):
+                print(f"[llm] {model} failed for {task or 'chat'}; trying fallback: {error_message}")
+                continue
+
+            break
+
+    raise RuntimeError("All configured LLM models failed: " + " | ".join(errors))
 
 
 def _parse_json(text: str) -> dict | list:
