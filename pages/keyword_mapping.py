@@ -11,7 +11,7 @@ from utils.data import (
     parse_keyword_csv,
     save_results,
 )
-from utils.llm import cost_tracker, estimate_cost, map_keywords
+from utils.llm import cost_tracker, estimate_cost, format_llm_error, map_keywords
 
 st.markdown("""
 <div class="page-hero">
@@ -259,6 +259,8 @@ if df is not None and len(df) > 0:
         progress_bar = st.progress(0)
         progress_bar.progress(start_batch_idx / total_batches)
 
+        stopped_early = False
+
         with st.status("Mapping keywords to URLs...", expanded=True) as status:
             batch_status = st.empty()
             if start_batch_idx >= total_batches:
@@ -303,17 +305,34 @@ if df is not None and len(df) > 0:
                             all_results.append(row_data)
 
                 except Exception as e:
-                    st.error(f"Batch {batch_idx + 1} failed: {e}")
-                    for i in range(len(batch_df)):
-                        row_idx = start + i
-                        if row_idx < len(df):
-                            row_data = df.iloc[row_idx].to_dict()
-                            row_data["mapped_url"] = ""
-                            row_data["confidence"] = 0
-                            row_data["search_intent"] = ""
-                            row_data["recommendation"] = "Error"
-                            row_data["notes"] = f"Batch failed: {e}"
-                            all_results.append(row_data)
+                    error_message = format_llm_error(e)
+                    st.error(f"Batch {batch_idx + 1} failed: {error_message}")
+                    checkpoint_meta = {
+                        "client_slug": selected_client,
+                        "client_business_name": profile.get("business_name", selected_client),
+                        "source_keyword_count": len(df),
+                        "processed_batches": batch_idx,
+                        "total_batches": total_batches,
+                        "completed": False,
+                        "failed_batch": batch_idx + 1,
+                        "last_error": error_message,
+                    }
+                    save_results(
+                        selected_client,
+                        "mapping",
+                        {"results": all_results, "meta": checkpoint_meta},
+                    )
+                    st.session_state.mapping_results = all_results
+                    st.session_state.mapping_meta = checkpoint_meta
+                    status.update(
+                        label=(
+                            f"Stopped at batch {batch_idx + 1}. "
+                            f"Results through batch {batch_idx} were saved."
+                        ),
+                        state="error",
+                    )
+                    stopped_early = True
+                    break
 
                 progress_bar.progress((batch_idx + 1) / total_batches)
 
@@ -334,14 +353,24 @@ if df is not None and len(df) > 0:
                 if batch_idx < total_batches - 1:
                     time.sleep(1)
 
-            final_meta = {
-                **st.session_state.get("mapping_meta", {}),
-                "processed_batches": total_batches,
-                "completed": True,
-            }
-            save_results(selected_client, "mapping", {"results": all_results, "meta": final_meta})
-            st.session_state.mapping_meta = final_meta
-            status.update(label=f"Done! Mapped {len(all_results)} keywords.", state="complete")
+            if stopped_early:
+                processed_batches = st.session_state.get("mapping_meta", {}).get(
+                    "processed_batches",
+                    start_batch_idx,
+                )
+                batch_status.warning(
+                    f"Stopped after {processed_batches} of {total_batches} batches. "
+                    "Fix the API issue, then use the resume button."
+                )
+            else:
+                final_meta = {
+                    **st.session_state.get("mapping_meta", {}),
+                    "processed_batches": total_batches,
+                    "completed": True,
+                }
+                save_results(selected_client, "mapping", {"results": all_results, "meta": final_meta})
+                st.session_state.mapping_meta = final_meta
+                status.update(label=f"Done! Mapped {len(all_results)} keywords.", state="complete")
 
         st.session_state.mapping_results = all_results
         cost_tracker.save_log(selected_client)

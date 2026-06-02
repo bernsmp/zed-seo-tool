@@ -11,8 +11,15 @@ from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
-from openai import OpenAI
-from tenacity import retry, stop_after_attempt, wait_exponential
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    InternalServerError,
+    OpenAI,
+    RateLimitError,
+)
+from tenacity import RetryError, retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env.local"))
 load_dotenv()  # Fallback to .env
@@ -112,9 +119,59 @@ cost_tracker = CostTracker()
 # ── Retry-wrapped LLM call ──────────────────────────────────────
 
 
+def _is_retryable_llm_error(exc: BaseException) -> bool:
+    """Retry only failures that are plausibly transient."""
+    if isinstance(exc, (APIConnectionError, APITimeoutError, InternalServerError, RateLimitError)):
+        return True
+    if isinstance(exc, APIStatusError):
+        return exc.status_code in {408, 409, 425, 429, 500, 502, 503, 504}
+    return False
+
+
+def _extract_api_error_message(exc: APIStatusError) -> str:
+    body = getattr(exc, "body", None)
+    message = ""
+
+    if isinstance(body, dict):
+        error = body.get("error")
+        if isinstance(error, dict):
+            message = str(error.get("message") or error.get("code") or "")
+            metadata = error.get("metadata")
+            if isinstance(metadata, dict) and metadata.get("raw"):
+                raw = str(metadata["raw"])
+                message = f"{message} ({raw})" if message else raw
+        elif isinstance(error, str):
+            message = error
+        else:
+            message = str(body.get("message") or body.get("detail") or "")
+
+    if not message:
+        message = str(exc)
+
+    return message if len(message) <= 600 else f"{message[:597]}..."
+
+
+def format_llm_error(exc: BaseException) -> str:
+    """Return a user-facing LLM error without Tenacity wrapper noise."""
+    if isinstance(exc, RetryError):
+        last_exc = exc.last_attempt.exception()
+        if last_exc is not None:
+            exc = last_exc
+
+    if isinstance(exc, APIStatusError):
+        return f"OpenRouter API {exc.status_code}: {_extract_api_error_message(exc)}"
+
+    if isinstance(exc, (APIConnectionError, APITimeoutError)):
+        return f"OpenRouter connection error: {exc}"
+
+    return str(exc)
+
+
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=2, min=2, max=30),
+    retry=retry_if_exception(_is_retryable_llm_error),
+    reraise=True,
 )
 def _chat(messages: list[dict], response_format: Optional[dict] = None, task: str = "") -> str:
     """Single LLM call with retry. Returns raw content string."""

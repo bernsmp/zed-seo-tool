@@ -13,7 +13,15 @@ from utils.data import (
     save_results,
     slugify,
 )
-from utils.llm import classify_keywords, cost_tracker, estimate_cost, generate_qc_summary, pre_filter_negatives, suggest_negative_keywords
+from utils.llm import (
+    classify_keywords,
+    cost_tracker,
+    estimate_cost,
+    format_llm_error,
+    generate_qc_summary,
+    pre_filter_negatives,
+    suggest_negative_keywords,
+)
 from utils.semrush import pull_competitor_keywords, check_api_units, estimate_api_cost
 
 st.markdown("""
@@ -369,6 +377,8 @@ if df is not None and len(df) > 0:
         if total_batches:
             progress_bar.progress(start_batch_idx / total_batches)
 
+        stopped_early = False
+
         with st.status("Classifying keywords...", expanded=True) as status:
             batch_status = st.empty()
             if start_batch_idx >= total_batches and total_batches > 0:
@@ -406,15 +416,36 @@ if df is not None and len(df) > 0:
                             anchor_examples.append(examples_of_cat[0])
 
                 except Exception as e:
-                    st.error(f"Batch {batch_idx + 1} failed: {e}")
-                    for i in range(len(batch_df)):
-                        row_idx = start + i
-                        if row_idx < len(filtered_df):
-                            row_data = filtered_df.iloc[row_idx].to_dict()
-                            row_data["classification"] = "UNSURE"
-                            row_data["confidence"] = 0
-                            row_data["reason"] = f"Batch failed: {e}"
-                            all_results.append(row_data)
+                    error_message = format_llm_error(e)
+                    st.error(f"Batch {batch_idx + 1} failed: {error_message}")
+                    checkpoint_meta = {
+                        "client_slug": selected_client,
+                        "client_business_name": profile.get("business_name", selected_client),
+                        "source_keyword_count": len(df),
+                        "auto_removed_count": len(auto_removed),
+                        "llm_keyword_count": len(filtered_df),
+                        "processed_batches": batch_idx,
+                        "total_batches": total_batches,
+                        "completed": False,
+                        "failed_batch": batch_idx + 1,
+                        "last_error": error_message,
+                    }
+                    save_results(
+                        selected_client,
+                        "cleaning",
+                        {"results": all_results, "meta": checkpoint_meta},
+                    )
+                    st.session_state.cleaning_results = all_results
+                    st.session_state.cleaning_meta = checkpoint_meta
+                    status.update(
+                        label=(
+                            f"Stopped at batch {batch_idx + 1}. "
+                            f"Results through batch {batch_idx} were saved."
+                        ),
+                        state="error",
+                    )
+                    stopped_early = True
+                    break
 
                 progress_bar.progress((batch_idx + 1) / total_batches)
 
@@ -439,35 +470,45 @@ if df is not None and len(df) > 0:
                 if batch_idx < total_batches - 1:
                     time.sleep(1)
 
-            if total_batches > 0:
+            if stopped_early:
+                processed_batches = st.session_state.get("cleaning_meta", {}).get(
+                    "processed_batches",
+                    start_batch_idx,
+                )
+                batch_status.warning(
+                    f"Stopped after {processed_batches} of {total_batches} batches. "
+                    "Fix the API issue, then use the resume button."
+                )
+            elif total_batches > 0:
                 batch_status.success(f"Classified {len(all_results):,} keywords across {total_batches} batches.")
                 status.update(label=f"Done! Classified {len(all_results)} keywords.", state="complete")
             else:
                 status.update(label=f"All {len(all_results)} keywords handled by negative keyword filter.", state="complete")
 
         # ── Generate QC summary ──────────────────────────────────
-        with st.status("Running quality check...", expanded=True):
-            try:
-                qc = generate_qc_summary(profile, all_results)
-                st.session_state.cleaning_qc = qc
-                # Re-save with QC
-                final_meta = {
-                    **st.session_state.get("cleaning_meta", {}),
-                    "processed_batches": st.session_state.get("cleaning_meta", {}).get("total_batches", 0),
-                    "completed": True,
-                }
-                save_results(
-                    selected_client,
-                    "cleaning",
-                    {
-                        "results": all_results,
-                        "qc_summary": qc,
-                        "meta": final_meta,
-                    },
-                )
-                st.session_state.cleaning_meta = final_meta
-            except Exception as e:
-                st.warning(f"QC summary generation failed: {e}")
+        if not stopped_early:
+            with st.status("Running quality check...", expanded=True):
+                try:
+                    qc = generate_qc_summary(profile, all_results)
+                    st.session_state.cleaning_qc = qc
+                    # Re-save with QC
+                    final_meta = {
+                        **st.session_state.get("cleaning_meta", {}),
+                        "processed_batches": st.session_state.get("cleaning_meta", {}).get("total_batches", 0),
+                        "completed": True,
+                    }
+                    save_results(
+                        selected_client,
+                        "cleaning",
+                        {
+                            "results": all_results,
+                            "qc_summary": qc,
+                            "meta": final_meta,
+                        },
+                    )
+                    st.session_state.cleaning_meta = final_meta
+                except Exception as e:
+                    st.warning(f"QC summary generation failed: {format_llm_error(e)}")
 
         st.session_state.cleaning_results = all_results
         cost_tracker.save_log(selected_client)

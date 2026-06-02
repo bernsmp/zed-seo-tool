@@ -80,11 +80,28 @@ def list_clients() -> list[str]:
 # --- Results (cleaning / mapping) ---
 
 
+def _has_failed_batch_rows(result: dict) -> bool:
+    """Detect old checkpoints that saved API failures as export rows."""
+    for row in result.get("results", []):
+        reason = str(row.get("reason", ""))
+        notes = str(row.get("notes", ""))
+        if reason.startswith("Batch failed:") or notes.startswith("Batch failed:"):
+            return True
+        if row.get("recommendation") == "Error":
+            return True
+    return False
+
+
 def _select_best_cleaning_result(results: list[dict]) -> Optional[dict]:
     """Prefer completed results, or the most advanced partial checkpoint for the latest source."""
     if not results:
         return None
 
+    usable_results = [result for result in results if not _has_failed_batch_rows(result)]
+    if not usable_results:
+        return results[0]
+
+    results = usable_results
     latest = results[0]
     latest_meta = latest.get("meta", {})
     if latest_meta.get("completed") or latest.get("qc_summary"):
@@ -119,6 +136,11 @@ def _select_best_mapping_result(results: list[dict]) -> Optional[dict]:
     if not results:
         return None
 
+    usable_results = [result for result in results if not _has_failed_batch_rows(result)]
+    if not usable_results:
+        return results[0]
+
+    results = usable_results
     latest = results[0]
     latest_meta = latest.get("meta", {})
     if latest_meta.get("completed"):
