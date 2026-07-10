@@ -4,7 +4,7 @@ from pathlib import Path
 import streamlit as st
 
 from utils.data import list_clients
-from utils.llm import _model, cost_tracker
+from utils.llm import _model, _model_chain, cost_tracker
 
 st.set_page_config(
     page_title="TM Studio · TrackableMed",
@@ -406,8 +406,12 @@ with st.sidebar:
 
     # Cost monitor
     st.divider()
+    model_chain = _model_chain()
     model_short = _model().split("/")[-1]
     st.caption(f"MODEL: {model_short}")
+    if len(model_chain) > 1:
+        fallback_models = " → ".join(route_model.split("/")[-1] for _, route_model in model_chain[1:])
+        st.caption(f"FALLBACK: {fallback_models}")
     summary = cost_tracker.summary()
     if summary["total_calls"] > 0:
         st.metric("Session Cost", f"${summary['total_cost_usd']:.4f}")

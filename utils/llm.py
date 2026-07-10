@@ -1,5 +1,5 @@
 """
-LLM client — OpenRouter API via openai library.
+LLM client — Anthropic direct API, with legacy OpenRouter compatibility.
 Handles keyword classification, keyword mapping, and profile generation.
 Tracks actual token usage and costs per session.
 """
@@ -8,65 +8,363 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
+import requests
+from anthropic import Anthropic
+from anthropic import (
+    APIConnectionError as AnthropicAPIConnectionError,
+    APIStatusError as AnthropicAPIStatusError,
+    APITimeoutError as AnthropicAPITimeoutError,
+)
 from dotenv import load_dotenv
 from openai import (
-    APIConnectionError,
-    APIStatusError,
-    APITimeoutError,
-    InternalServerError,
+    APIConnectionError as OpenAIAPIConnectionError,
+    APIStatusError as OpenAIAPIStatusError,
+    APITimeoutError as OpenAIAPITimeoutError,
+    InternalServerError as OpenAIInternalServerError,
     OpenAI,
-    RateLimitError,
+    RateLimitError as OpenAIRateLimitError,
 )
 from tenacity import RetryError, retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env.local"))
 load_dotenv()  # Fallback to .env
 
-_client: Optional[OpenAI] = None
+_clients: dict[str, Any] = {}
 
 
-def _get_client() -> OpenAI:
-    global _client
-    if _client is None:
-        api_key = os.getenv("OPENROUTER_API_KEY")
-        if not api_key:
+def _provider(require_key: bool = False) -> str:
+    explicit_provider = os.getenv("LLM_PROVIDER", "").strip().lower()
+    if explicit_provider not in {"", "anthropic", "gemini", "openrouter"}:
+        raise ValueError("LLM_PROVIDER must be 'anthropic', 'gemini', or 'openrouter'.")
+
+    if explicit_provider == "anthropic" or (not explicit_provider and os.getenv("ANTHROPIC_API_KEY")):
+        if require_key and not os.getenv("ANTHROPIC_API_KEY"):
+            raise ValueError(
+                "ANTHROPIC_API_KEY not set. "
+                "Add Zed's Anthropic key to .env.local or set the environment variable."
+            )
+        return "anthropic"
+
+    if explicit_provider == "gemini" or (not explicit_provider and _gemini_api_key()):
+        if require_key and not _gemini_api_key():
+            raise ValueError(
+                "GEMINI_API_KEY not set. "
+                "Add Zed's Gemini key to .env.local or set GOOGLE_API_KEY."
+            )
+        return "gemini"
+
+    if explicit_provider == "openrouter" or (not explicit_provider and os.getenv("OPENROUTER_API_KEY")):
+        if require_key and not os.getenv("OPENROUTER_API_KEY"):
             raise ValueError(
                 "OPENROUTER_API_KEY not set. "
                 "Add it to .env.local or set the environment variable."
             )
-        _client = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=api_key,
-            default_headers={
-                "HTTP-Referer": "http://localhost:8501",
-                "X-Title": "TM Studio",
-            },
+        return "openrouter"
+
+    if require_key:
+        raise ValueError(
+            "No LLM API key set. Add ANTHROPIC_API_KEY or GEMINI_API_KEY to .env.local. "
+            "Legacy OpenRouter installs can use OPENROUTER_API_KEY."
         )
-    return _client
+
+    return "anthropic"
+
+
+def _gemini_api_key() -> Optional[str]:
+    return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+
+
+def _get_client(provider: Optional[str] = None) -> Any:
+    provider = provider or _provider(require_key=True)
+
+    if provider == "anthropic" and not os.getenv("ANTHROPIC_API_KEY"):
+        raise ValueError(
+            "ANTHROPIC_API_KEY not set. "
+            "Add Zed's Anthropic key to .env.local or set the environment variable."
+        )
+
+    if provider == "openrouter" and not os.getenv("OPENROUTER_API_KEY"):
+        raise ValueError(
+            "OPENROUTER_API_KEY not set. "
+            "Add it to .env.local or set the environment variable."
+        )
+
+    if provider not in _clients:
+        if provider == "anthropic":
+            _clients[provider] = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        elif provider == "openrouter":
+            _clients[provider] = OpenAI(
+                base_url="https://openrouter.ai/api/v1",
+                api_key=os.getenv("OPENROUTER_API_KEY"),
+                default_headers={
+                    "HTTP-Referer": "http://localhost:8501",
+                    "X-Title": "TM Studio",
+                },
+            )
+        else:
+            raise ValueError(f"Unsupported SDK client provider: {provider}")
+
+    return _clients[provider]
+
+
+ANTHROPIC_MODEL_ALIASES = {
+    "anthropic/claude-haiku-4.5": "claude-haiku-4-5",
+    "anthropic/claude-haiku-4-5": "claude-haiku-4-5",
+    "anthropic/claude-haiku-4-5-20251001": "claude-haiku-4-5-20251001",
+    "anthropic/claude-sonnet-4.5": "claude-sonnet-4-5",
+    "anthropic/claude-sonnet-4-5": "claude-sonnet-4-5",
+    "anthropic/claude-sonnet-4-5-20250929": "claude-sonnet-4-5-20250929",
+    "anthropic/claude-sonnet-4.6": "claude-sonnet-4-6",
+    "anthropic/claude-sonnet-4-6": "claude-sonnet-4-6",
+    "anthropic/claude-opus-4.6": "claude-opus-4-6",
+    "anthropic/claude-opus-4-6": "claude-opus-4-6",
+}
+
+
+def _model_for_provider(model: str, provider: Optional[str] = None) -> Optional[str]:
+    provider = provider or _provider()
+    model = model.strip()
+    if not model:
+        return None
+
+    if provider == "anthropic":
+        if model.startswith(("google/", "moonshotai/", "openai/", "meta-llama/")):
+            return None
+        return ANTHROPIC_MODEL_ALIASES.get(model, model.removeprefix("anthropic/"))
+
+    if provider == "gemini":
+        if model.startswith("google/"):
+            return model.removeprefix("google/")
+        if model.startswith(("gemini-", "models/gemini-")):
+            return model.removeprefix("models/")
+        return None
+
+    # OpenRouter expects provider-prefixed model IDs.
+    if model.startswith("claude-"):
+        return f"anthropic/{model}"
+    return model
 
 
 def _model() -> str:
-    return os.getenv("DEFAULT_LLM_MODEL", "anthropic/claude-haiku-4.5")
-
-
-def _fallback_models() -> list[str]:
-    fallback_env = os.getenv(
-        "DEFAULT_LLM_FALLBACK_MODELS",
-        "google/gemini-2.5-flash,moonshotai/kimi-k2",
+    provider = _provider()
+    raw_model = (
+        os.getenv("DEFAULT_GEMINI_MODEL", "gemini-2.5-flash")
+        if provider == "gemini"
+        else os.getenv("DEFAULT_LLM_MODEL", "claude-sonnet-4-6")
     )
-    return [model.strip() for model in fallback_env.split(",") if model.strip()]
+    return _model_for_provider(raw_model, provider) or raw_model
 
 
-def _model_chain() -> list[str]:
-    models = [_model(), *_fallback_models()]
-    return list(dict.fromkeys(models))
+def _model_route() -> tuple[str, str]:
+    provider = _provider()
+    return provider, _model()
 
 
-# ── Pricing table ($ per 1M tokens on OpenRouter) ───────────────
+def _fallback_model_routes() -> list[tuple[str, str]]:
+    provider = _provider()
+    fallback_env = os.getenv("DEFAULT_LLM_FALLBACK_MODELS")
+    if fallback_env is None:
+        if provider == "anthropic" and _gemini_api_key():
+            fallback_env = os.getenv("DEFAULT_GEMINI_MODEL", "gemini-2.5-flash")
+        else:
+            fallback_env = (
+                "claude-haiku-4-5"
+                if provider == "anthropic"
+                else "google/gemini-2.5-flash,moonshotai/kimi-k2"
+            )
+
+    routes = []
+    for model in fallback_env.split(","):
+        model = model.strip()
+        if not model:
+            continue
+
+        route_provider = "gemini" if model.startswith(("gemini-", "models/gemini-")) else provider
+        provider_model = _model_for_provider(model, route_provider)
+        if provider_model:
+            routes.append((route_provider, provider_model))
+    return routes
+
+
+def _model_chain() -> list[tuple[str, str]]:
+    routes = [_model_route(), *_fallback_model_routes()]
+    return list(dict.fromkeys(routes))
+
+
+def _max_output_tokens() -> int:
+    return int(os.getenv("MAX_OUTPUT_TOKENS", "4096"))
+
+
+def _anthropic_messages(messages: list[dict]) -> tuple[list[dict], Optional[str]]:
+    system_parts = []
+    request_messages = []
+
+    for message in messages:
+        role = message.get("role", "user")
+        content = message.get("content", "")
+        if role == "system":
+            system_parts.append(str(content))
+        elif role in {"user", "assistant"}:
+            request_messages.append({"role": role, "content": content})
+        else:
+            request_messages.append({"role": "user", "content": str(content)})
+
+    return request_messages, "\n\n".join(system_parts) if system_parts else None
+
+
+def _anthropic_content_text(content: list[Any]) -> str:
+    return "".join(
+        block.text
+        for block in content
+        if getattr(block, "type", None) == "text" and getattr(block, "text", None)
+    )
+
+
+def _record_usage(model: str, usage: Any, task: str = ""):
+    if not usage:
+        return
+
+    input_tokens = getattr(usage, "prompt_tokens", None)
+    output_tokens = getattr(usage, "completion_tokens", None)
+
+    if input_tokens is None:
+        input_tokens = getattr(usage, "input_tokens", 0)
+    if output_tokens is None:
+        output_tokens = getattr(usage, "output_tokens", 0)
+
+    cost_tracker.record(
+        model=model,
+        input_tokens=input_tokens or 0,
+        output_tokens=output_tokens or 0,
+        task=task,
+    )
+
+
+def _chat_with_anthropic(model: str, messages: list[dict], task: str = "") -> str:
+    request_messages, system = _anthropic_messages(messages)
+    kwargs = {
+        "model": model,
+        "messages": request_messages,
+        "temperature": 0.3,
+        "max_tokens": _max_output_tokens(),
+    }
+    if system:
+        kwargs["system"] = system
+
+    resp = _get_client("anthropic").messages.create(**kwargs)
+    _record_usage(model, resp.usage, task=task)
+    return _anthropic_content_text(resp.content)
+
+
+def _gemini_contents(messages: list[dict]) -> tuple[list[dict], Optional[dict]]:
+    system_parts = []
+    contents = []
+
+    for message in messages:
+        role = message.get("role", "user")
+        content = str(message.get("content", ""))
+        if role == "system":
+            system_parts.append(content)
+        else:
+            contents.append({
+                "role": "model" if role == "assistant" else "user",
+                "parts": [{"text": content}],
+            })
+
+    system_instruction = None
+    if system_parts:
+        system_instruction = {"parts": [{"text": "\n\n".join(system_parts)}]}
+
+    return contents, system_instruction
+
+
+def _chat_with_gemini(
+    model: str,
+    messages: list[dict],
+    response_format: Optional[dict] = None,
+    task: str = "",
+) -> str:
+    api_key = _gemini_api_key()
+    if not api_key:
+        raise ValueError(
+            "GEMINI_API_KEY not set. "
+            "Add Zed's Gemini key to .env.local or set GOOGLE_API_KEY."
+        )
+
+    contents, system_instruction = _gemini_contents(messages)
+    generation_config = {
+        "temperature": 0.3,
+        "maxOutputTokens": _max_output_tokens(),
+    }
+    if response_format:
+        generation_config["responseMimeType"] = "application/json"
+
+    payload = {
+        "contents": contents,
+        "generationConfig": generation_config,
+    }
+    if system_instruction:
+        payload["systemInstruction"] = system_instruction
+
+    resp = requests.post(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+        headers={
+            "Content-Type": "application/json",
+            "x-goog-api-key": api_key,
+        },
+        json=payload,
+        timeout=90,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    usage = data.get("usageMetadata", {})
+    cost_tracker.record(
+        model=model,
+        input_tokens=usage.get("promptTokenCount", 0) or 0,
+        output_tokens=usage.get("candidatesTokenCount", 0) or 0,
+        task=task,
+    )
+
+    candidates = data.get("candidates", [])
+    if not candidates:
+        raise RuntimeError("Gemini returned no candidates.")
+
+    parts = candidates[0].get("content", {}).get("parts", [])
+    return "".join(part.get("text", "") for part in parts if part.get("text"))
+
+
+def _chat_with_openrouter(
+    model: str,
+    messages: list[dict],
+    response_format: Optional[dict] = None,
+    task: str = "",
+) -> str:
+    kwargs = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.3,
+    }
+    if response_format:
+        kwargs["response_format"] = response_format
+    resp = _get_client("openrouter").chat.completions.create(**kwargs)
+
+    _record_usage(model, resp.usage, task=task)
+    return resp.choices[0].message.content
+
+
+# ── Pricing table ($ per 1M tokens) ──────────────────────────────
 
 MODEL_PRICING = {
+    "claude-sonnet-4-6": {"input": 3.00, "output": 15.00},
+    "claude-haiku-4-5": {"input": 1.00, "output": 5.00},
+    "claude-haiku-4-5-20251001": {"input": 1.00, "output": 5.00},
+    "claude-sonnet-4-5": {"input": 3.00, "output": 15.00},
+    "claude-sonnet-4-5-20250929": {"input": 3.00, "output": 15.00},
+    "gemini-2.5-flash": {"input": 0.30, "output": 2.50},
+    "gemini-2.5-flash-lite": {"input": 0.10, "output": 0.40},
     "anthropic/claude-haiku-4.5": {"input": 1.00, "output": 5.00},
     "anthropic/claude-3.5-haiku": {"input": 1.00, "output": 5.00},
     "anthropic/claude-sonnet-4-5-20250929": {"input": 3.00, "output": 15.00},
@@ -134,10 +432,24 @@ cost_tracker = CostTracker()
 
 def _is_retryable_llm_error(exc: BaseException) -> bool:
     """Retry only failures that are plausibly transient."""
-    if isinstance(exc, (APIConnectionError, APITimeoutError, InternalServerError, RateLimitError)):
+    if isinstance(
+        exc,
+        (
+            AnthropicAPIConnectionError,
+            AnthropicAPITimeoutError,
+            OpenAIAPIConnectionError,
+            OpenAIAPITimeoutError,
+            OpenAIInternalServerError,
+            OpenAIRateLimitError,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+        ),
+    ):
         return True
-    if isinstance(exc, APIStatusError):
+    if isinstance(exc, (AnthropicAPIStatusError, OpenAIAPIStatusError)):
         return exc.status_code in {408, 409, 425, 429, 500, 502, 503, 504}
+    if isinstance(exc, requests.exceptions.HTTPError) and exc.response is not None:
+        return exc.response.status_code in {408, 409, 425, 429, 500, 502, 503, 504}
     return False
 
 
@@ -147,13 +459,23 @@ def _should_try_fallback_model(exc: BaseException) -> bool:
         if last_exc is not None:
             exc = last_exc
 
-    if isinstance(exc, APIStatusError):
+    if isinstance(exc, (AnthropicAPIStatusError, OpenAIAPIStatusError)):
         return exc.status_code not in {401, 402, 403}
 
-    return isinstance(exc, (APIConnectionError, APITimeoutError))
+    return isinstance(
+        exc,
+        (
+            AnthropicAPIConnectionError,
+            AnthropicAPITimeoutError,
+            OpenAIAPIConnectionError,
+            OpenAIAPITimeoutError,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+        ),
+    )
 
 
-def _extract_api_error_message(exc: APIStatusError) -> str:
+def _extract_api_error_message(exc: Any) -> str:
     body = getattr(exc, "body", None)
     message = ""
 
@@ -176,6 +498,30 @@ def _extract_api_error_message(exc: APIStatusError) -> str:
     return message if len(message) <= 600 else f"{message[:597]}..."
 
 
+def _extract_requests_error_message(exc: requests.exceptions.HTTPError) -> str:
+    response = exc.response
+    if response is None:
+        return str(exc)
+
+    message = ""
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+
+    if isinstance(body, dict):
+        error = body.get("error")
+        if isinstance(error, dict):
+            message = str(error.get("message") or error.get("status") or "")
+        else:
+            message = str(body.get("message") or "")
+
+    if not message:
+        message = response.text or str(exc)
+
+    return message if len(message) <= 600 else f"{message[:597]}..."
+
+
 def format_llm_error(exc: BaseException) -> str:
     """Return a user-facing LLM error without Tenacity wrapper noise."""
     if isinstance(exc, RetryError):
@@ -183,11 +529,24 @@ def format_llm_error(exc: BaseException) -> str:
         if last_exc is not None:
             exc = last_exc
 
-    if isinstance(exc, APIStatusError):
+    if isinstance(exc, AnthropicAPIStatusError):
+        return f"Anthropic API {exc.status_code}: {_extract_api_error_message(exc)}"
+
+    if isinstance(exc, OpenAIAPIStatusError):
         return f"OpenRouter API {exc.status_code}: {_extract_api_error_message(exc)}"
 
-    if isinstance(exc, (APIConnectionError, APITimeoutError)):
+    if isinstance(exc, (AnthropicAPIConnectionError, AnthropicAPITimeoutError)):
+        return f"Anthropic connection error: {exc}"
+
+    if isinstance(exc, (OpenAIAPIConnectionError, OpenAIAPITimeoutError)):
         return f"OpenRouter connection error: {exc}"
+
+    if isinstance(exc, requests.exceptions.HTTPError):
+        status = exc.response.status_code if exc.response is not None else "unknown"
+        return f"Gemini API {status}: {_extract_requests_error_message(exc)}"
+
+    if isinstance(exc, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)):
+        return f"Gemini connection error: {exc}"
 
     return str(exc)
 
@@ -199,48 +558,47 @@ def format_llm_error(exc: BaseException) -> str:
     reraise=True,
 )
 def _chat_with_model(
+    provider: str,
     model: str,
     messages: list[dict],
     response_format: Optional[dict] = None,
     task: str = "",
 ) -> str:
     """Single-model LLM call with retry. Returns raw content string."""
-    kwargs = {
-        "model": model,
-        "messages": messages,
-        "temperature": 0.3,
-    }
-    if response_format:
-        kwargs["response_format"] = response_format
-    resp = _get_client().chat.completions.create(**kwargs)
+    if provider == "anthropic":
+        return _chat_with_anthropic(model, messages, task=task)
 
-    # Track actual token usage from response
-    usage = resp.usage
-    if usage:
-        cost_tracker.record(
-            model=model,
-            input_tokens=usage.prompt_tokens or 0,
-            output_tokens=usage.completion_tokens or 0,
+    if provider == "gemini":
+        return _chat_with_gemini(
+            model,
+            messages,
+            response_format=response_format,
             task=task,
         )
 
-    return resp.choices[0].message.content
+    return _chat_with_openrouter(
+        model,
+        messages,
+        response_format=response_format,
+        task=task,
+    )
 
 
 def _chat(messages: list[dict], response_format: Optional[dict] = None, task: str = "") -> str:
     """LLM call with model fallback. Returns raw content string."""
     errors = []
-    models = _model_chain()
+    routes = _model_chain()
 
-    for idx, model in enumerate(models):
+    for idx, (provider, model) in enumerate(routes):
         try:
-            return _chat_with_model(model, messages, response_format=response_format, task=task)
+            return _chat_with_model(provider, model, messages, response_format=response_format, task=task)
         except Exception as exc:
             error_message = format_llm_error(exc)
-            errors.append(f"{model}: {error_message}")
+            errors.append(f"{provider}/{model}: {error_message}")
 
-            has_fallback = idx < len(models) - 1
-            if has_fallback and _should_try_fallback_model(exc):
+            has_fallback = idx < len(routes) - 1
+            next_provider = routes[idx + 1][0] if has_fallback else provider
+            if has_fallback and (next_provider != provider or _should_try_fallback_model(exc)):
                 print(f"[llm] {model} failed for {task or 'chat'}; trying fallback: {error_message}")
                 continue
 
