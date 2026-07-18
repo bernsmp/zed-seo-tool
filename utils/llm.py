@@ -194,7 +194,7 @@ def _model_chain() -> list[tuple[str, str]]:
 
 
 def _max_output_tokens() -> int:
-    return int(os.getenv("MAX_OUTPUT_TOKENS", "4096"))
+    return int(os.getenv("MAX_OUTPUT_TOKENS", "8192"))
 
 
 def _anthropic_messages(messages: list[dict]) -> tuple[list[dict], Optional[str]]:
@@ -244,17 +244,24 @@ def _record_usage(model: str, usage: Any, task: str = ""):
 
 def _chat_with_anthropic(model: str, messages: list[dict], task: str = "") -> str:
     request_messages, system = _anthropic_messages(messages)
+    max_output_tokens = _max_output_tokens()
     kwargs = {
         "model": model,
         "messages": request_messages,
         "temperature": 0.3,
-        "max_tokens": _max_output_tokens(),
+        "max_tokens": max_output_tokens,
     }
     if system:
         kwargs["system"] = system
 
     resp = _get_client("anthropic").messages.create(**kwargs)
     _record_usage(model, resp.usage, task=task)
+    if resp.stop_reason == "max_tokens":
+        raise RuntimeError(
+            "Anthropic response was truncated after reaching the "
+            f"{max_output_tokens}-token output limit. "
+            "Increase MAX_OUTPUT_TOKENS before retrying."
+        )
     return _anthropic_content_text(resp.content)
 
 
@@ -854,7 +861,15 @@ Confidence scoring (0-100):
         task="classify_keywords",
     )
     data = _parse_json(raw)
-    return data.get("classifications", data) if isinstance(data, dict) else data
+    classifications = data.get("classifications", data) if isinstance(data, dict) else data
+    if not isinstance(classifications, list):
+        raise RuntimeError("The LLM returned an invalid keyword classification payload.")
+    if len(classifications) != len(keywords):
+        raise RuntimeError(
+            f"The LLM returned {len(classifications)} of {len(keywords)} "
+            "keyword classifications. Retry the batch."
+        )
+    return classifications
 
 
 def generate_qc_summary(profile: dict, results: list[dict]) -> dict:
