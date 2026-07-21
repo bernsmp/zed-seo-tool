@@ -216,6 +216,7 @@ if df is not None and len(df) > 0:
             and not existing_meta.get("completed", True)
             and existing_meta.get("source_keyword_count") == len(df)
             and existing_meta.get("total_batches") == total_batches
+            and existing_meta.get("batch_size", BATCH_SIZE) == BATCH_SIZE
             and isinstance(processed_batches, int)
             and 0 <= processed_batches <= total_batches
         )
@@ -252,6 +253,7 @@ if df is not None and len(df) > 0:
             "source_keyword_count": len(df),
             "processed_batches": start_batch_idx,
             "total_batches": total_batches,
+            "batch_size": BATCH_SIZE,
             "completed": False,
         }
         st.session_state.mapping_results_client = selected_client
@@ -313,6 +315,7 @@ if df is not None and len(df) > 0:
                         "source_keyword_count": len(df),
                         "processed_batches": batch_idx,
                         "total_batches": total_batches,
+                        "batch_size": BATCH_SIZE,
                         "completed": False,
                         "failed_batch": batch_idx + 1,
                         "last_error": error_message,
@@ -342,6 +345,7 @@ if df is not None and len(df) > 0:
                     "source_keyword_count": len(df),
                     "processed_batches": batch_idx + 1,
                     "total_batches": total_batches,
+                    "batch_size": BATCH_SIZE,
                     "completed": False,
                 }
 

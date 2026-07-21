@@ -136,9 +136,14 @@ def _select_best_mapping_result(results: list[dict]) -> Optional[dict]:
     if not results:
         return None
 
-    usable_results = [result for result in results if not _has_failed_batch_rows(result)]
+    usable_results = [
+        result
+        for result in results
+        if _mapping_checkpoint_is_consistent(result)
+        and not _has_failed_batch_rows(result)
+    ]
     if not usable_results:
-        return results[0]
+        return None
 
     results = usable_results
     latest = results[0]
@@ -171,6 +176,25 @@ def _select_best_mapping_result(results: list[dict]) -> Optional[dict]:
     )
 
 
+def _mapping_checkpoint_is_consistent(result: dict) -> bool:
+    """Reject checkpoints that marked more source rows processed than they saved."""
+    meta = result.get("meta", {})
+    processed_batches = meta.get("processed_batches")
+    source_keyword_count = meta.get("source_keyword_count")
+    batch_size = meta.get("batch_size", 100)
+
+    if not all(
+        isinstance(value, int) and value >= 0
+        for value in (processed_batches, source_keyword_count, batch_size)
+    ) or batch_size == 0:
+        return True
+
+    expected_count = min(processed_batches * batch_size, source_keyword_count)
+    if meta.get("completed"):
+        expected_count = source_keyword_count
+    return len(result.get("results", [])) == expected_count
+
+
 def save_results(slug: str, result_type: str, data: dict) -> Path:
     """Save cleaning or mapping results with timestamp.
     result_type: 'cleaning' or 'mapping'
@@ -195,13 +219,17 @@ def load_latest_results(slug: str, result_type: str) -> Optional[dict]:
     # Try Supabase first
     if db.is_available():
         if result_type == "cleaning":
-            result = _select_best_cleaning_result(db.load_recent_results(slug, result_type))
+            remote_results = db.load_recent_results(slug, result_type)
+            if remote_results:
+                return _select_best_cleaning_result(remote_results)
         elif result_type == "mapping":
-            result = _select_best_mapping_result(db.load_recent_results(slug, result_type))
+            remote_results = db.load_recent_results(slug, result_type)
+            if remote_results:
+                return _select_best_mapping_result(remote_results)
         else:
             result = db.load_latest_result(slug, result_type)
-        if result:
-            return result
+            if result:
+                return result
 
     # Fall back to local files
     client_dir = _client_dir(slug)

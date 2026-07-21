@@ -32,6 +32,7 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env.loca
 load_dotenv()  # Fallback to .env
 
 _clients: dict[str, Any] = {}
+MAPPING_REQUEST_BATCH_SIZE = 50
 
 
 def _provider(require_key: bool = False) -> str:
@@ -1081,16 +1082,31 @@ def map_keywords(
         f"- {u['url']} | {u.get('title', '')} | {u.get('summary', '')}"
         for u in urls
     )
-    keyword_lines = "\n".join(
-        f"- {kw['keyword']}"
-        + (f" (Volume: {kw.get('volume', 'N/A')}, Intent: {kw.get('intent', 'N/A')})" if kw.get("volume") else "")
-        for kw in keywords
-    )
+    profile_json = json.dumps(profile, indent=2)
+    unique_keywords_by_text = {}
+    for keyword in keywords:
+        unique_keywords_by_text.setdefault(keyword["keyword"], keyword)
+    unique_keywords = list(unique_keywords_by_text.values())
 
-    prompt = f"""You are an SEO keyword-to-URL mapper.
+    mappings_by_keyword = {}
+    for request_start in range(0, len(unique_keywords), MAPPING_REQUEST_BATCH_SIZE):
+        request_keywords = unique_keywords[
+            request_start : request_start + MAPPING_REQUEST_BATCH_SIZE
+        ]
+        keyword_lines = "\n".join(
+            f"- {kw['keyword']}"
+            + (
+                f" (Volume: {kw.get('volume', 'N/A')}, Intent: {kw.get('intent', 'N/A')})"
+                if kw.get("volume")
+                else ""
+            )
+            for kw in request_keywords
+        )
+
+        prompt = f"""You are an SEO keyword-to-URL mapper.
 
 CLIENT PROFILE:
-{json.dumps(profile, indent=2)}
+{profile_json}
 
 CLIENT URLS:
 {url_lines}
@@ -1111,13 +1127,33 @@ Rules:
 Return ONLY a JSON object in this exact format:
 {{"mappings": [{{"keyword": "...", "url": "...|NEW_PAGE|BLOG_POST", "confidence": 0-100, "intent": "...", "notes": "..."}}]}}"""
 
-    raw = _chat(
-        [{"role": "user", "content": prompt}],
-        response_format={"type": "json_object"},
-        task="map_keywords",
-    )
-    data = _parse_json(raw)
-    return data.get("mappings", data) if isinstance(data, dict) else data
+        raw = _chat(
+            [{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+            task="map_keywords",
+        )
+        data = _parse_json(raw)
+        mappings = data.get("mappings", data) if isinstance(data, dict) else data
+        if not isinstance(mappings, list):
+            raise RuntimeError("The LLM returned an invalid keyword mapping payload.")
+        if len(mappings) != len(request_keywords):
+            raise RuntimeError(
+                f"The LLM returned {len(mappings)} of {len(request_keywords)} "
+                "keyword mappings. Retry the batch."
+            )
+
+        requested_order = [item["keyword"] for item in request_keywords]
+        returned_order = [item.get("keyword") for item in mappings]
+        if returned_order != requested_order:
+            raise RuntimeError(
+                "The LLM returned keyword mappings with missing keywords or keywords "
+                "in a different order. Retry the batch."
+            )
+        mappings_by_keyword.update(
+            (mapping["keyword"], mapping) for mapping in mappings
+        )
+
+    return [dict(mappings_by_keyword[item["keyword"]]) for item in keywords]
 
 
 def generate_client_profile(domain: str, pages: list[dict]) -> dict:
@@ -1162,7 +1198,8 @@ def estimate_cost(num_keywords: int, task_type: str = "cleaning") -> dict:
     - 100 keywords with metadata: ~2500 tokens
     - Classification output (100 kw): ~3000 tokens (keyword + classification + reason)
     - URL inventory (50 URLs): ~3000 tokens
-    - Mapping output (100 kw): ~4000 tokens (keyword + url + confidence + intent + notes)
+    - Mapping requests: 50 keywords each to stay within the output limit
+    - Mapping output (50 kw): ~2000 tokens (keyword + url + confidence + intent + notes)
     """
     model = _model()
     pricing = MODEL_PRICING.get(model, {"input": 1.00, "output": 5.00})
@@ -1171,17 +1208,24 @@ def estimate_cost(num_keywords: int, task_type: str = "cleaning") -> dict:
     batches = max(1, (num_keywords + batch_size - 1) // batch_size)
 
     if task_type == "cleaning":
+        requests = batches
         input_per_batch = 3300  # ~800 profile + ~2500 keywords
         output_per_batch = 3000  # structured JSON classifications
     elif task_type == "briefs":
+        requests = batches
         input_per_batch = 4000   # ~800 profile + ~1500 URLs + ~1700 cluster context
         output_per_batch = 5000  # detailed structured brief JSON
     else:  # mapping
-        input_per_batch = 6300  # ~800 profile + ~3000 URLs + ~2500 keywords
-        output_per_batch = 4000  # structured JSON mappings
+        requests = max(
+            1,
+            (num_keywords + MAPPING_REQUEST_BATCH_SIZE - 1)
+            // MAPPING_REQUEST_BATCH_SIZE,
+        )
+        input_per_batch = 5050  # ~800 profile + ~3000 URLs + ~1250 keywords
+        output_per_batch = 2000  # structured JSON mappings
 
-    total_input = batches * input_per_batch
-    total_output = batches * output_per_batch
+    total_input = requests * input_per_batch
+    total_output = requests * output_per_batch
 
     cost = (total_input * pricing["input"] / 1_000_000) + (
         total_output * pricing["output"] / 1_000_000
@@ -1190,8 +1234,9 @@ def estimate_cost(num_keywords: int, task_type: str = "cleaning") -> dict:
     return {
         "model": model,
         "batches": batches,
+        "requests": requests,
         "est_input_tokens": total_input,
         "est_output_tokens": total_output,
         "est_cost_usd": round(cost, 4),
-        "est_minutes": round(batches * 0.12, 1),  # ~7s per batch for Haiku
+        "est_minutes": round(requests * 0.12, 1),  # ~7s per request for Haiku
     }

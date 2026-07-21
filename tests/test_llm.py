@@ -1,3 +1,4 @@
+import json
 import os
 import unittest
 from types import SimpleNamespace
@@ -73,6 +74,171 @@ class KeywordBatchValidationTests(unittest.TestCase):
                     {"business_name": "Test Clinic"},
                     [{"keyword": "vein clinic"}, {"keyword": "spider veins"}],
                 )
+
+
+class KeywordMappingValidationTests(unittest.TestCase):
+    @staticmethod
+    def _mapping(keyword):
+        return {
+            "keyword": keyword,
+            "url": "https://example.com/veins",
+            "confidence": 90,
+            "intent": "transactional",
+            "notes": "Relevant service page",
+        }
+
+    def test_large_mapping_batch_is_split_into_safe_requests(self):
+        keywords = [{"keyword": f"keyword {index}"} for index in range(100)]
+        responses = [
+            json.dumps(
+                {"mappings": [self._mapping(item["keyword"]) for item in keywords[:50]]}
+            ),
+            json.dumps(
+                {"mappings": [self._mapping(item["keyword"]) for item in keywords[50:]]}
+            ),
+        ]
+
+        with patch.object(llm, "_chat", side_effect=responses) as chat:
+            mappings = llm.map_keywords(
+                {"business_name": "Test Clinic"},
+                keywords,
+                [{"url": "https://example.com/veins", "title": "Vein Care"}],
+            )
+
+        self.assertEqual(chat.call_count, 2)
+        self.assertEqual(len(mappings), 100)
+        self.assertEqual(
+            [mapping["keyword"] for mapping in mappings],
+            [item["keyword"] for item in keywords],
+        )
+
+    def test_duplicate_keywords_are_mapped_once_and_reexpanded(self):
+        keywords = [
+            {"keyword": "vein clinic"},
+            {"keyword": "spider veins"},
+            {"keyword": "vein clinic"},
+        ]
+        response = json.dumps(
+            {
+                "mappings": [
+                    self._mapping("vein clinic"),
+                    self._mapping("spider veins"),
+                ]
+            }
+        )
+
+        with patch.object(llm, "_chat", return_value=response) as chat:
+            mappings = llm.map_keywords(
+                {"business_name": "Test Clinic"},
+                keywords,
+                [{"url": "https://example.com/veins", "title": "Vein Care"}],
+            )
+
+        chat.assert_called_once()
+        self.assertEqual(
+            [mapping["keyword"] for mapping in mappings],
+            [item["keyword"] for item in keywords],
+        )
+
+    def test_final_partial_mapping_request_preserves_order(self):
+        keywords = [{"keyword": f"keyword {index}"} for index in range(51)]
+        responses = [
+            json.dumps(
+                {"mappings": [self._mapping(item["keyword"]) for item in keywords[:50]]}
+            ),
+            json.dumps({"mappings": [self._mapping(keywords[50]["keyword"])]}),
+        ]
+
+        with patch.object(llm, "_chat", side_effect=responses) as chat:
+            mappings = llm.map_keywords(
+                {"business_name": "Test Clinic"},
+                keywords,
+                [{"url": "https://example.com/veins", "title": "Vein Care"}],
+            )
+
+        self.assertEqual(chat.call_count, 2)
+        self.assertEqual(
+            [mapping["keyword"] for mapping in mappings],
+            [item["keyword"] for item in keywords],
+        )
+
+    def test_second_mapping_request_failure_returns_no_partial_result(self):
+        keywords = [{"keyword": f"keyword {index}"} for index in range(100)]
+        first_response = json.dumps(
+            {"mappings": [self._mapping(item["keyword"]) for item in keywords[:50]]}
+        )
+
+        with patch.object(
+            llm,
+            "_chat",
+            side_effect=[first_response, RuntimeError("provider unavailable")],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "provider unavailable"):
+                llm.map_keywords(
+                    {"business_name": "Test Clinic"},
+                    keywords,
+                    [{"url": "https://example.com/veins", "title": "Vein Care"}],
+                )
+
+    def test_incomplete_mapping_request_is_rejected(self):
+        keywords = [{"keyword": "vein clinic"}, {"keyword": "spider veins"}]
+        response = json.dumps({"mappings": [self._mapping("vein clinic")]})
+
+        with patch.object(llm, "_chat", return_value=response):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "LLM returned 1 of 2 keyword mappings",
+            ):
+                llm.map_keywords(
+                    {"business_name": "Test Clinic"},
+                    keywords,
+                    [{"url": "https://example.com/veins", "title": "Vein Care"}],
+                )
+
+    def test_reordered_mapping_request_is_rejected(self):
+        keywords = [{"keyword": "vein clinic"}, {"keyword": "spider veins"}]
+        response = json.dumps(
+            {
+                "mappings": [
+                    self._mapping("spider veins"),
+                    self._mapping("vein clinic"),
+                ]
+            }
+        )
+
+        with patch.object(llm, "_chat", return_value=response):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "keywords in a different order",
+            ):
+                llm.map_keywords(
+                    {"business_name": "Test Clinic"},
+                    keywords,
+                    [{"url": "https://example.com/veins", "title": "Vein Care"}],
+                )
+
+    def test_invalid_mapping_payload_is_rejected(self):
+        response = json.dumps({"mappings": {}})
+
+        with patch.object(llm, "_chat", return_value=response):
+            with self.assertRaisesRegex(RuntimeError, "invalid keyword mapping payload"):
+                llm.map_keywords(
+                    {"business_name": "Test Clinic"},
+                    [{"keyword": "vein clinic"}],
+                    [{"url": "https://example.com/veins", "title": "Vein Care"}],
+                )
+
+
+class MappingCostEstimateTests(unittest.TestCase):
+    def test_mapping_estimate_counts_internal_requests(self):
+        with patch.object(llm, "_model", return_value="anthropic/claude-haiku-4-5"):
+            one_progress_batch = llm.estimate_cost(100, "mapping")
+            carlos_run = llm.estimate_cost(2621, "mapping")
+
+        self.assertEqual(one_progress_batch["batches"], 1)
+        self.assertEqual(one_progress_batch["requests"], 2)
+        self.assertEqual(carlos_run["batches"], 27)
+        self.assertEqual(carlos_run["requests"], 53)
 
 
 if __name__ == "__main__":
