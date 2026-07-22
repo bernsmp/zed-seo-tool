@@ -46,6 +46,29 @@ class ProviderFallbackTests(unittest.TestCase):
         self.assertEqual(chat.call_count, 2)
         self.assertEqual(chat.call_args_list[1].args[:2], routes[1])
 
+    def test_malformed_anthropic_json_uses_gemini_fallback(self):
+        routes = [
+            ("anthropic", "claude-haiku-4-5"),
+            ("gemini", "gemini-2.5-flash"),
+        ]
+        valid_json = '{"classifications": []}'
+
+        with patch.object(llm, "_model_chain", return_value=routes):
+            with patch.object(
+                llm,
+                "_chat_with_model",
+                side_effect=['{"classifications": [oops]}', valid_json],
+            ) as chat:
+                result = llm._chat(
+                    [{"role": "user", "content": "Return JSON"}],
+                    response_format={"type": "json_object"},
+                    task="classify_keywords",
+                )
+
+        self.assertEqual(result, valid_json)
+        self.assertEqual(chat.call_count, 2)
+        self.assertEqual(chat.call_args_list[1].args[:2], routes[1])
+
 
 class AnthropicOutputLimitTests(unittest.TestCase):
     def test_default_output_limit_handles_full_keyword_batch(self):
@@ -98,6 +121,48 @@ class AnthropicOutputLimitTests(unittest.TestCase):
 
 
 class KeywordBatchValidationTests(unittest.TestCase):
+    @staticmethod
+    def _classification(keyword):
+        return {
+            "keyword": keyword,
+            "classification": "KEEP",
+            "confidence": 95,
+            "reason": "Relevant service",
+        }
+
+    def test_large_classification_batch_is_split_into_safe_requests(self):
+        keywords = [{"keyword": f"keyword {index}"} for index in range(100)]
+        responses = [
+            json.dumps(
+                {
+                    "classifications": [
+                        self._classification(item["keyword"])
+                        for item in keywords[:50]
+                    ]
+                }
+            ),
+            json.dumps(
+                {
+                    "classifications": [
+                        self._classification(item["keyword"])
+                        for item in keywords[50:]
+                    ]
+                }
+            ),
+        ]
+
+        with patch.object(llm, "_chat", side_effect=responses) as chat:
+            classifications = llm.classify_keywords(
+                {"business_name": "Test Clinic"},
+                keywords,
+            )
+
+        self.assertEqual(chat.call_count, 2)
+        self.assertEqual(
+            [item["keyword"] for item in classifications],
+            [item["keyword"] for item in keywords],
+        )
+
     def test_incomplete_classification_batch_is_rejected(self):
         partial_json = (
             '{"classifications": [{"keyword": "vein clinic", '
@@ -279,6 +344,18 @@ class MappingCostEstimateTests(unittest.TestCase):
         self.assertEqual(one_progress_batch["requests"], 2)
         self.assertEqual(carlos_run["batches"], 27)
         self.assertEqual(carlos_run["requests"], 53)
+
+
+class CleaningCostEstimateTests(unittest.TestCase):
+    def test_cleaning_estimate_counts_internal_requests(self):
+        with patch.object(llm, "_model", return_value="claude-haiku-4-5"):
+            one_progress_batch = llm.estimate_cost(100, "cleaning")
+            carlos_run = llm.estimate_cost(30150, "cleaning")
+
+        self.assertEqual(one_progress_batch["batches"], 1)
+        self.assertEqual(one_progress_batch["requests"], 2)
+        self.assertEqual(carlos_run["batches"], 302)
+        self.assertEqual(carlos_run["requests"], 603)
 
 
 if __name__ == "__main__":

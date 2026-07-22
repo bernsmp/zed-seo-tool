@@ -32,6 +32,7 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env.loca
 load_dotenv()  # Fallback to .env
 
 _clients: dict[str, Any] = {}
+CLASSIFICATION_REQUEST_BATCH_SIZE = 50
 MAPPING_REQUEST_BATCH_SIZE = 50
 
 
@@ -490,6 +491,7 @@ def _should_try_fallback_model(exc: BaseException) -> bool:
     return isinstance(
         exc,
         (
+            json.JSONDecodeError,
             AnthropicAPIConnectionError,
             AnthropicAPITimeoutError,
             OpenAIAPIConnectionError,
@@ -573,6 +575,12 @@ def format_llm_error(exc: BaseException) -> str:
     if isinstance(exc, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)):
         return f"Gemini connection error: {exc}"
 
+    if isinstance(exc, json.JSONDecodeError):
+        return (
+            "AI response was malformed JSON "
+            f"(line {exc.lineno}, column {exc.colno})."
+        )
+
     return str(exc)
 
 
@@ -616,7 +624,16 @@ def _chat(messages: list[dict], response_format: Optional[dict] = None, task: st
 
     for idx, (provider, model) in enumerate(routes):
         try:
-            return _chat_with_model(provider, model, messages, response_format=response_format, task=task)
+            raw = _chat_with_model(
+                provider,
+                model,
+                messages,
+                response_format=response_format,
+                task=task,
+            )
+            if response_format:
+                _parse_json(raw)
+            return raw
         except Exception as exc:
             error_message = format_llm_error(exc)
             errors.append(f"{provider}/{model}: {error_message}")
@@ -821,6 +838,25 @@ def classify_keywords(
     Returns:
         List of dicts: [{keyword, classification, reason}, ...]
     """
+    if len(keywords) > CLASSIFICATION_REQUEST_BATCH_SIZE:
+        classifications = []
+        for request_start in range(
+            0,
+            len(keywords),
+            CLASSIFICATION_REQUEST_BATCH_SIZE,
+        ):
+            classifications.extend(
+                classify_keywords(
+                    profile,
+                    keywords[
+                        request_start : request_start
+                        + CLASSIFICATION_REQUEST_BATCH_SIZE
+                    ],
+                    examples=examples,
+                )
+            )
+        return classifications
+
     keyword_lines = "\n".join(
         f"- {kw['keyword']}"
         + (f" (Volume: {kw.get('volume', 'N/A')}, KD: {kw.get('kd', 'N/A')}, Intent: {kw.get('intent', 'N/A')})" if kw.get("volume") else "")
@@ -1212,8 +1248,9 @@ def estimate_cost(num_keywords: int, task_type: str = "cleaning") -> dict:
 
     Token estimates based on:
     - Client profile JSON: ~800 tokens
-    - 100 keywords with metadata: ~2500 tokens
-    - Classification output (100 kw): ~3000 tokens (keyword + classification + reason)
+    - Classification requests: 50 keywords each for reliable structured output
+    - 50 keywords with metadata: ~1250 tokens
+    - Classification output (50 kw): ~1500 tokens (keyword + classification + reason)
     - URL inventory (50 URLs): ~3000 tokens
     - Mapping requests: 50 keywords each to stay within the output limit
     - Mapping output (50 kw): ~2000 tokens (keyword + url + confidence + intent + notes)
@@ -1225,9 +1262,13 @@ def estimate_cost(num_keywords: int, task_type: str = "cleaning") -> dict:
     batches = max(1, (num_keywords + batch_size - 1) // batch_size)
 
     if task_type == "cleaning":
-        requests = batches
-        input_per_batch = 3300  # ~800 profile + ~2500 keywords
-        output_per_batch = 3000  # structured JSON classifications
+        requests = max(
+            1,
+            (num_keywords + CLASSIFICATION_REQUEST_BATCH_SIZE - 1)
+            // CLASSIFICATION_REQUEST_BATCH_SIZE,
+        )
+        input_per_batch = 2050  # ~800 profile + ~1250 keywords
+        output_per_batch = 1500  # structured JSON classifications
     elif task_type == "briefs":
         requests = batches
         input_per_batch = 4000   # ~800 profile + ~1500 URLs + ~1700 cluster context
