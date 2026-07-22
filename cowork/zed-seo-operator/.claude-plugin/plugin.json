@@ -1,0 +1,16 @@
+{
+  "name": "zed-seo-operator",
+  "version": "0.1.1",
+  "description": "Carlos-facing SEO operations in Cowork: SEMrush research, client profiles, resumable keyword cleaning and mapping, validated exports, and one-click incident packaging.",
+  "author": {
+    "name": "Max Bernstein"
+  },
+  "keywords": [
+    "trackable-med",
+    "zed",
+    "seo",
+    "semrush",
+    "keyword-cleaning",
+    "keyword-mapping"
+  ]
+}

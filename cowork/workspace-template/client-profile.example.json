@@ -1,0 +1,22 @@
+{
+  "business_name": "Example Medical Practice",
+  "domain": "example.com",
+  "services": [
+    "example service"
+  ],
+  "locations": [
+    "Example City, ST"
+  ],
+  "specialties": [],
+  "negative_keywords": [],
+  "negative_categories": [],
+  "url_inventory": [
+    {
+      "url": "https://example.com/example-service",
+      "title": "Example Service",
+      "summary": "The page describes the example service."
+    }
+  ],
+  "updated_at": "2026-07-22T00:00:00Z",
+  "source_notes": "Replace every example value with verified client information."
+}
