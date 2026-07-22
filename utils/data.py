@@ -131,6 +131,66 @@ def _select_best_cleaning_result(results: list[dict]) -> Optional[dict]:
     return max(candidates, key=lambda result: result.get("meta", {}).get("processed_batches", 0))
 
 
+def reconcile_cleaning_checkpoint(
+    results: list[dict],
+    auto_removed: list[dict],
+    llm_keywords: list[dict],
+    processed_batches: int,
+    batch_size: int = 100,
+) -> tuple[list[dict], int, int]:
+    """Realign a cleaning checkpoint to its source and discard duplicate rows.
+
+    Streamlit can rerun between mutating an in-memory results list and saving
+    its matching batch counter. Source-order comparison lets us preserve every
+    verified batch while safely dropping duplicated or uncommitted rows.
+    """
+    if processed_batches < 0 or batch_size <= 0:
+        return list(auto_removed), 0, len(results)
+
+    saved_llm_results = results[len(auto_removed):]
+    accepted_results = []
+    accepted_batches = 0
+    saved_offset = 0
+
+    while accepted_batches < processed_batches:
+        source_start = accepted_batches * batch_size
+        expected_block = llm_keywords[source_start: source_start + batch_size]
+        if not expected_block:
+            break
+
+        block_length = len(expected_block)
+        candidate_block = saved_llm_results[saved_offset: saved_offset + block_length]
+        if len(candidate_block) != block_length:
+            break
+
+        expected_keywords = [str(row.get("keyword", "")) for row in expected_block]
+        candidate_keywords = [str(row.get("keyword", "")) for row in candidate_block]
+        if candidate_keywords == expected_keywords:
+            accepted_results.extend(candidate_block)
+            accepted_batches += 1
+            saved_offset += block_length
+            continue
+
+        if accepted_batches > 0:
+            previous_start = (accepted_batches - 1) * batch_size
+            previous_block = llm_keywords[previous_start: previous_start + batch_size]
+            previous_keywords = [str(row.get("keyword", "")) for row in previous_block]
+            duplicate_block = saved_llm_results[
+                saved_offset: saved_offset + len(previous_block)
+            ]
+            duplicate_keywords = [
+                str(row.get("keyword", "")) for row in duplicate_block
+            ]
+            if len(duplicate_block) == len(previous_block) and duplicate_keywords == previous_keywords:
+                saved_offset += len(previous_block)
+                continue
+
+        break
+
+    discarded_rows = len(saved_llm_results) - len(accepted_results)
+    return list(auto_removed) + accepted_results, accepted_batches, discarded_rows
+
+
 def _select_best_mapping_result(results: list[dict]) -> Optional[dict]:
     """Prefer the most advanced active mapping checkpoint for the latest source."""
     if not results:

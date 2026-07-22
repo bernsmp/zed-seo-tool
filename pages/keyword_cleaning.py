@@ -9,6 +9,7 @@ from utils.data import (
     load_client_profile,
     load_latest_results,
     parse_keyword_csv,
+    reconcile_cleaning_checkpoint,
     save_client_profile,
     save_results,
     slugify,
@@ -328,13 +329,25 @@ if df is not None and len(df) > 0:
             and existing_meta.get("source_keyword_count") == len(df)
             and existing_meta.get("auto_removed_count") == len(auto_removed)
             and existing_meta.get("llm_keyword_count") == len(filtered_df)
+            and existing_meta.get("batch_size", BATCH_SIZE) == BATCH_SIZE
             and isinstance(processed_batches, int)
             and 0 <= processed_batches <= total_batches
         )
 
         if checkpoint_matches_source:
-            all_results = list(existing_results)
-            start_batch_idx = processed_batches
+            all_results, start_batch_idx, discarded_rows = reconcile_cleaning_checkpoint(
+                existing_results,
+                auto_removed,
+                filtered_df.to_dict(orient="records"),
+                processed_batches,
+                BATCH_SIZE,
+            )
+            if discarded_rows or start_batch_idx != processed_batches:
+                st.warning(
+                    "Repaired the saved checkpoint before resuming: "
+                    f"preserved {start_batch_idx} verified batches and removed "
+                    f"{discarded_rows} duplicated or uncommitted rows."
+                )
             if start_batch_idx < total_batches:
                 st.info(f"Resuming from batch {start_batch_idx + 1} of {total_batches}.")
             else:
@@ -359,7 +372,7 @@ if df is not None and len(df) > 0:
             if len(anchor_examples) >= 3:
                 break
 
-        st.session_state.cleaning_results = all_results
+        st.session_state.cleaning_results = list(all_results)
         st.session_state.cleaning_qc = None
         st.session_state.cleaning_meta = {
             "client_slug": selected_client,
@@ -369,9 +382,25 @@ if df is not None and len(df) > 0:
             "llm_keyword_count": len(filtered_df),
             "processed_batches": start_batch_idx,
             "total_batches": total_batches,
+            "batch_size": BATCH_SIZE,
             "completed": False,
         }
         st.session_state.cleaning_results_client = selected_client
+
+        if checkpoint_matches_source and (
+            discarded_rows or start_batch_idx != processed_batches
+        ):
+            repaired_meta = {
+                **st.session_state.cleaning_meta,
+                "checkpoint_repaired": True,
+                "discarded_checkpoint_rows": discarded_rows,
+            }
+            save_results(
+                selected_client,
+                "cleaning",
+                {"results": list(all_results), "meta": repaired_meta},
+            )
+            st.session_state.cleaning_meta = repaired_meta
 
         progress_bar = st.progress(0)
         if total_batches:
@@ -401,6 +430,7 @@ if df is not None and len(df) > 0:
                         profile, keywords, examples=anchor_examples if anchor_examples else None
                     )
 
+                    batch_rows = []
                     for i, result in enumerate(batch_results):
                         row_idx = start + i
                         if row_idx < len(filtered_df):
@@ -408,7 +438,9 @@ if df is not None and len(df) > 0:
                             row_data["classification"] = result.get("classification", "UNSURE")
                             row_data["confidence"] = result.get("confidence", 50)
                             row_data["reason"] = result.get("reason", "")
-                            all_results.append(row_data)
+                            batch_rows.append(row_data)
+
+                    all_results.extend(batch_rows)
 
                     for cat in ["KEEP", "REMOVE", "UNSURE"]:
                         examples_of_cat = [r for r in batch_results if r.get("classification") == cat]
@@ -426,6 +458,7 @@ if df is not None and len(df) > 0:
                         "llm_keyword_count": len(filtered_df),
                         "processed_batches": batch_idx,
                         "total_batches": total_batches,
+                        "batch_size": BATCH_SIZE,
                         "completed": False,
                         "failed_batch": batch_idx + 1,
                         "last_error": error_message,
@@ -433,9 +466,9 @@ if df is not None and len(df) > 0:
                     save_results(
                         selected_client,
                         "cleaning",
-                        {"results": all_results, "meta": checkpoint_meta},
+                        {"results": list(all_results), "meta": checkpoint_meta},
                     )
-                    st.session_state.cleaning_results = all_results
+                    st.session_state.cleaning_results = list(all_results)
                     st.session_state.cleaning_meta = checkpoint_meta
                     status.update(
                         label=(
@@ -457,14 +490,15 @@ if df is not None and len(df) > 0:
                     "llm_keyword_count": len(filtered_df),
                     "processed_batches": batch_idx + 1,
                     "total_batches": total_batches,
+                    "batch_size": BATCH_SIZE,
                     "completed": False,
                 }
                 save_results(
                     selected_client,
                     "cleaning",
-                    {"results": all_results, "meta": checkpoint_meta},
+                    {"results": list(all_results), "meta": checkpoint_meta},
                 )
-                st.session_state.cleaning_results = all_results
+                st.session_state.cleaning_results = list(all_results)
                 st.session_state.cleaning_meta = checkpoint_meta
 
                 if batch_idx < total_batches - 1:
@@ -501,7 +535,7 @@ if df is not None and len(df) > 0:
                         selected_client,
                         "cleaning",
                         {
-                            "results": all_results,
+                            "results": list(all_results),
                             "qc_summary": qc,
                             "meta": final_meta,
                         },
@@ -510,7 +544,7 @@ if df is not None and len(df) > 0:
                 except Exception as e:
                     st.warning(f"QC summary generation failed: {format_llm_error(e)}")
 
-        st.session_state.cleaning_results = all_results
+        st.session_state.cleaning_results = list(all_results)
         cost_tracker.save_log(selected_client)
 
 # ── Results view ─────────────────────────────────────────────────

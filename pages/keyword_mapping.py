@@ -246,7 +246,7 @@ if df is not None and len(df) > 0:
                     "Starting from batch 1."
                 )
 
-        st.session_state.mapping_results = all_results
+        st.session_state.mapping_results = list(all_results)
         st.session_state.mapping_meta = {
             "client_slug": selected_client,
             "client_business_name": profile.get("business_name", selected_client),
@@ -323,9 +323,9 @@ if df is not None and len(df) > 0:
                     save_results(
                         selected_client,
                         "mapping",
-                        {"results": all_results, "meta": checkpoint_meta},
+                        {"results": list(all_results), "meta": checkpoint_meta},
                     )
-                    st.session_state.mapping_results = all_results
+                    st.session_state.mapping_results = list(all_results)
                     st.session_state.mapping_meta = checkpoint_meta
                     status.update(
                         label=(
@@ -350,8 +350,8 @@ if df is not None and len(df) > 0:
                 }
 
                 # Auto-save after each batch
-                save_results(selected_client, "mapping", {"results": all_results, "meta": checkpoint_meta})
-                st.session_state.mapping_results = all_results
+                save_results(selected_client, "mapping", {"results": list(all_results), "meta": checkpoint_meta})
+                st.session_state.mapping_results = list(all_results)
                 st.session_state.mapping_meta = checkpoint_meta
 
                 if batch_idx < total_batches - 1:
@@ -372,11 +372,11 @@ if df is not None and len(df) > 0:
                     "processed_batches": total_batches,
                     "completed": True,
                 }
-                save_results(selected_client, "mapping", {"results": all_results, "meta": final_meta})
+                save_results(selected_client, "mapping", {"results": list(all_results), "meta": final_meta})
                 st.session_state.mapping_meta = final_meta
                 status.update(label=f"Done! Mapped {len(all_results)} keywords.", state="complete")
 
-        st.session_state.mapping_results = all_results
+        st.session_state.mapping_results = list(all_results)
         cost_tracker.save_log(selected_client)
 
 # ── Results view ─────────────────────────────────────────────────

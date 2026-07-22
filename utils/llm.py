@@ -182,10 +182,27 @@ def _fallback_model_routes() -> list[tuple[str, str]]:
         if not model:
             continue
 
-        route_provider = "gemini" if model.startswith(("gemini-", "models/gemini-")) else provider
+        route_provider = (
+            "gemini"
+            if model.startswith(("gemini-", "models/gemini-", "google/gemini-"))
+            else provider
+        )
         provider_model = _model_for_provider(model, route_provider)
         if provider_model:
             routes.append((route_provider, provider_model))
+
+    # A configured Gemini key is an operational fallback even when an older
+    # DEFAULT_LLM_FALLBACK_MODELS setting only names Anthropic models. This
+    # keeps long-running jobs moving through provider billing or availability
+    # failures without changing the preferred provider.
+    if provider == "anthropic" and _gemini_api_key():
+        gemini_model = _model_for_provider(
+            os.getenv("DEFAULT_GEMINI_MODEL", "gemini-2.5-flash"),
+            "gemini",
+        )
+        if gemini_model:
+            routes.append(("gemini", gemini_model))
+
     return routes
 
 

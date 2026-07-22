@@ -7,6 +7,46 @@ from unittest.mock import Mock, patch
 from utils import llm
 
 
+class ProviderFallbackTests(unittest.TestCase):
+    def test_gemini_is_kept_as_fallback_when_legacy_models_are_configured(self):
+        environment = {
+            "LLM_PROVIDER": "anthropic",
+            "ANTHROPIC_API_KEY": "test-anthropic-key",
+            "GEMINI_API_KEY": "test-gemini-key",
+            "DEFAULT_LLM_MODEL": "claude-haiku-4-5",
+            "DEFAULT_LLM_FALLBACK_MODELS": "claude-sonnet-4-6",
+            "DEFAULT_GEMINI_MODEL": "gemini-2.5-flash",
+        }
+
+        with patch.dict(os.environ, environment, clear=True):
+            self.assertEqual(
+                llm._model_chain(),
+                [
+                    ("anthropic", "claude-haiku-4-5"),
+                    ("anthropic", "claude-sonnet-4-6"),
+                    ("gemini", "gemini-2.5-flash"),
+                ],
+            )
+
+    def test_anthropic_failure_uses_gemini_fallback(self):
+        routes = [
+            ("anthropic", "claude-haiku-4-5"),
+            ("gemini", "gemini-2.5-flash"),
+        ]
+
+        with patch.object(llm, "_model_chain", return_value=routes):
+            with patch.object(
+                llm,
+                "_chat_with_model",
+                side_effect=[RuntimeError("credit balance too low"), '{"ok": true}'],
+            ) as chat:
+                result = llm._chat([{"role": "user", "content": "Return JSON"}])
+
+        self.assertEqual(result, '{"ok": true}')
+        self.assertEqual(chat.call_count, 2)
+        self.assertEqual(chat.call_args_list[1].args[:2], routes[1])
+
+
 class AnthropicOutputLimitTests(unittest.TestCase):
     def test_default_output_limit_handles_full_keyword_batch(self):
         with patch.dict(os.environ, {}, clear=True):

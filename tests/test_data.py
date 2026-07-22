@@ -113,5 +113,66 @@ class MappingCheckpointSelectionTests(unittest.TestCase):
         self.assertIsNone(selected)
 
 
+class CleaningCheckpointReconciliationTests(unittest.TestCase):
+    @staticmethod
+    def _source(count):
+        return [{"keyword": f"keyword {index}"} for index in range(count)]
+
+    @staticmethod
+    def _classified(rows):
+        return [
+            {
+                **row,
+                "classification": "KEEP",
+                "confidence": 90,
+                "reason": "Relevant",
+            }
+            for row in rows
+        ]
+
+    def test_duplicate_middle_batch_is_removed_without_losing_later_batches(self):
+        auto_removed = [{"keyword": "jobs", "classification": "REMOVE"}]
+        source = self._source(500)
+        classified = self._classified(source)
+        saved = (
+            auto_removed
+            + classified[:200]
+            + classified[100:200]
+            + classified[200:500]
+        )
+
+        repaired, processed_batches, discarded_rows = data.reconcile_cleaning_checkpoint(
+            saved,
+            auto_removed,
+            source,
+            processed_batches=5,
+            batch_size=100,
+        )
+
+        self.assertEqual(processed_batches, 5)
+        self.assertEqual(discarded_rows, 100)
+        self.assertEqual(
+            [row["keyword"] for row in repaired],
+            ["jobs", *[row["keyword"] for row in source]],
+        )
+
+    def test_misaligned_checkpoint_rewinds_to_last_verified_batch(self):
+        source = self._source(300)
+        classified = self._classified(source)
+        saved = classified[:100] + [{"keyword": "unexpected"}] * 100
+
+        repaired, processed_batches, discarded_rows = data.reconcile_cleaning_checkpoint(
+            saved,
+            [],
+            source,
+            processed_batches=2,
+            batch_size=100,
+        )
+
+        self.assertEqual(processed_batches, 1)
+        self.assertEqual(discarded_rows, 100)
+        self.assertEqual(repaired, classified[:100])
+
+
 if __name__ == "__main__":
     unittest.main()
