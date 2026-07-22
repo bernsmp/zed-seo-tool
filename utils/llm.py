@@ -34,6 +34,7 @@ load_dotenv()  # Fallback to .env
 _clients: dict[str, Any] = {}
 CLASSIFICATION_REQUEST_BATCH_SIZE = 50
 MAPPING_REQUEST_BATCH_SIZE = 50
+STRUCTURED_RESPONSE_ATTEMPTS = 3
 
 
 def _provider(require_key: bool = False) -> str:
@@ -326,6 +327,9 @@ def _chat_with_gemini(
     }
     if response_format:
         generation_config["responseMimeType"] = "application/json"
+        json_schema = response_format.get("json_schema", {}).get("schema")
+        if json_schema:
+            generation_config["responseJsonSchema"] = json_schema
 
     payload = {
         "contents": contents,
@@ -358,7 +362,13 @@ def _chat_with_gemini(
     if not candidates:
         raise RuntimeError("Gemini returned no candidates.")
 
-    parts = candidates[0].get("content", {}).get("parts", [])
+    candidate = candidates[0]
+    if candidate.get("finishReason") == "MAX_TOKENS":
+        raise RuntimeError(
+            "Gemini response was truncated after reaching the output limit."
+        )
+
+    parts = candidate.get("content", {}).get("parts", [])
     return "".join(part.get("text", "") for part in parts if part.get("text"))
 
 
@@ -584,6 +594,11 @@ def format_llm_error(exc: BaseException) -> str:
     return str(exc)
 
 
+def _is_structured_output_failure(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return "malformed json" in message or "response was truncated" in message
+
+
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=2, min=2, max=30),
@@ -623,28 +638,53 @@ def _chat(messages: list[dict], response_format: Optional[dict] = None, task: st
     routes = _model_chain()
 
     for idx, (provider, model) in enumerate(routes):
-        try:
-            raw = _chat_with_model(
-                provider,
-                model,
-                messages,
-                response_format=response_format,
-                task=task,
-            )
-            if response_format:
-                _parse_json(raw)
-            return raw
-        except Exception as exc:
-            error_message = format_llm_error(exc)
-            errors.append(f"{provider}/{model}: {error_message}")
+        attempts = STRUCTURED_RESPONSE_ATTEMPTS if response_format else 1
+        route_error = None
 
-            has_fallback = idx < len(routes) - 1
-            next_provider = routes[idx + 1][0] if has_fallback else provider
-            if has_fallback and (next_provider != provider or _should_try_fallback_model(exc)):
-                print(f"[llm] {model} failed for {task or 'chat'}; trying fallback: {error_message}")
-                continue
+        for attempt in range(attempts):
+            try:
+                raw = _chat_with_model(
+                    provider,
+                    model,
+                    messages,
+                    response_format=response_format,
+                    task=task,
+                )
+                if response_format:
+                    _parse_json(raw)
+                return raw
+            except json.JSONDecodeError as exc:
+                route_error = exc
+                if attempt < attempts - 1:
+                    print(
+                        f"[llm] {model} returned malformed JSON for "
+                        f"{task or 'chat'}; retrying structured response "
+                        f"({attempt + 2}/{attempts})"
+                    )
+                    continue
+                break
+            except Exception as exc:
+                route_error = exc
+                break
 
+        if route_error is None:
             break
+
+        error_message = format_llm_error(route_error)
+        errors.append(f"{provider}/{model}: {error_message}")
+
+        has_fallback = idx < len(routes) - 1
+        next_provider = routes[idx + 1][0] if has_fallback else provider
+        if has_fallback and (
+            next_provider != provider or _should_try_fallback_model(route_error)
+        ):
+            print(
+                f"[llm] {model} failed for {task or 'chat'}; "
+                f"trying fallback: {error_message}"
+            )
+            continue
+
+        break
 
     raise RuntimeError("All configured LLM models failed: " + " | ".join(errors))
 
@@ -689,9 +729,19 @@ CLASSIFICATION_SCHEMA = {
                                 "type": "string",
                                 "enum": ["KEEP", "REMOVE", "UNSURE"],
                             },
+                            "confidence": {
+                                "type": "number",
+                                "minimum": 0,
+                                "maximum": 100,
+                            },
                             "reason": {"type": "string"},
                         },
-                        "required": ["keyword", "classification", "reason"],
+                        "required": [
+                            "keyword",
+                            "classification",
+                            "confidence",
+                            "reason",
+                        ],
                         "additionalProperties": False,
                     },
                 }
@@ -909,11 +959,21 @@ Confidence scoring (0-100):
 - 50-69: Borderline, could go either way
 - Below 50: Low confidence, flag for human review"""
 
-    raw = _chat(
-        [{"role": "user", "content": prompt}],
-        response_format={"type": "json_object"},
-        task="classify_keywords",
-    )
+    try:
+        raw = _chat(
+            [{"role": "user", "content": prompt}],
+            response_format=CLASSIFICATION_SCHEMA,
+            task="classify_keywords",
+        )
+    except RuntimeError as exc:
+        if len(keywords) > 1 and _is_structured_output_failure(exc):
+            midpoint = len(keywords) // 2
+            return [
+                *classify_keywords(profile, keywords[:midpoint], examples=examples),
+                *classify_keywords(profile, keywords[midpoint:], examples=examples),
+            ]
+        raise
+
     data = _parse_json(raw)
     classifications = data.get("classifications", data) if isinstance(data, dict) else data
     if not isinstance(classifications, list):
@@ -1182,7 +1242,7 @@ Return ONLY a JSON object in this exact format:
 
         raw = _chat(
             [{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
+            response_format=MAPPING_SCHEMA,
             task="map_keywords",
         )
         data = _parse_json(raw)

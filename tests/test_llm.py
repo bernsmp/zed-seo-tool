@@ -46,7 +46,7 @@ class ProviderFallbackTests(unittest.TestCase):
         self.assertEqual(chat.call_count, 2)
         self.assertEqual(chat.call_args_list[1].args[:2], routes[1])
 
-    def test_malformed_anthropic_json_uses_gemini_fallback(self):
+    def test_malformed_json_retries_same_model(self):
         routes = [
             ("anthropic", "claude-haiku-4-5"),
             ("gemini", "gemini-2.5-flash"),
@@ -67,7 +67,94 @@ class ProviderFallbackTests(unittest.TestCase):
 
         self.assertEqual(result, valid_json)
         self.assertEqual(chat.call_count, 2)
-        self.assertEqual(chat.call_args_list[1].args[:2], routes[1])
+        self.assertEqual(chat.call_args_list[1].args[:2], routes[0])
+
+    def test_repeated_malformed_json_uses_gemini_fallback(self):
+        routes = [
+            ("anthropic", "claude-haiku-4-5"),
+            ("gemini", "gemini-2.5-flash"),
+        ]
+        malformed_json = '{"classifications": [oops]}'
+        valid_json = '{"classifications": []}'
+
+        with patch.object(llm, "_model_chain", return_value=routes):
+            with patch.object(
+                llm,
+                "_chat_with_model",
+                side_effect=[
+                    malformed_json,
+                    malformed_json,
+                    malformed_json,
+                    valid_json,
+                ],
+            ) as chat:
+                result = llm._chat(
+                    [{"role": "user", "content": "Return JSON"}],
+                    response_format={"type": "json_object"},
+                    task="classify_keywords",
+                )
+
+        self.assertEqual(result, valid_json)
+        self.assertEqual(chat.call_count, 4)
+        self.assertEqual(chat.call_args_list[3].args[:2], routes[1])
+
+
+class GeminiStructuredOutputTests(unittest.TestCase):
+    @staticmethod
+    def _response(payload):
+        response = Mock()
+        response.json.return_value = payload
+        response.raise_for_status.return_value = None
+        return response
+
+    def test_json_schema_is_sent_to_gemini(self):
+        response = self._response(
+            {
+                "candidates": [
+                    {
+                        "finishReason": "STOP",
+                        "content": {"parts": [{"text": '{"classifications": []}'}]},
+                    }
+                ]
+            }
+        )
+
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}, clear=True):
+            with patch.object(llm.requests, "post", return_value=response) as post:
+                result = llm._chat_with_gemini(
+                    "gemini-2.5-flash",
+                    [{"role": "user", "content": "Classify"}],
+                    response_format=llm.CLASSIFICATION_SCHEMA,
+                )
+
+        generation_config = post.call_args.kwargs["json"]["generationConfig"]
+        self.assertEqual(result, '{"classifications": []}')
+        self.assertEqual(generation_config["responseMimeType"], "application/json")
+        self.assertEqual(
+            generation_config["responseJsonSchema"],
+            llm.CLASSIFICATION_SCHEMA["json_schema"]["schema"],
+        )
+
+    def test_max_token_finish_reason_is_rejected(self):
+        response = self._response(
+            {
+                "candidates": [
+                    {
+                        "finishReason": "MAX_TOKENS",
+                        "content": {"parts": [{"text": '{"classifications": ['}]},
+                    }
+                ]
+            }
+        )
+
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}, clear=True):
+            with patch.object(llm.requests, "post", return_value=response):
+                with self.assertRaisesRegex(RuntimeError, "Gemini response was truncated"):
+                    llm._chat_with_gemini(
+                        "gemini-2.5-flash",
+                        [{"role": "user", "content": "Classify"}],
+                        response_format=llm.CLASSIFICATION_SCHEMA,
+                    )
 
 
 class AnthropicOutputLimitTests(unittest.TestCase):
@@ -158,6 +245,43 @@ class KeywordBatchValidationTests(unittest.TestCase):
             )
 
         self.assertEqual(chat.call_count, 2)
+        self.assertEqual(
+            [item["keyword"] for item in classifications],
+            [item["keyword"] for item in keywords],
+        )
+
+    def test_structured_output_failure_splits_request_and_continues(self):
+        keywords = [{"keyword": f"keyword {index}"} for index in range(50)]
+        responses = [
+            RuntimeError(
+                "All configured LLM models failed: Gemini response was "
+                "malformed JSON"
+            ),
+            json.dumps(
+                {
+                    "classifications": [
+                        self._classification(item["keyword"])
+                        for item in keywords[:25]
+                    ]
+                }
+            ),
+            json.dumps(
+                {
+                    "classifications": [
+                        self._classification(item["keyword"])
+                        for item in keywords[25:]
+                    ]
+                }
+            ),
+        ]
+
+        with patch.object(llm, "_chat", side_effect=responses) as chat:
+            classifications = llm.classify_keywords(
+                {"business_name": "Test Clinic"},
+                keywords,
+            )
+
+        self.assertEqual(chat.call_count, 3)
         self.assertEqual(
             [item["keyword"] for item in classifications],
             [item["keyword"] for item in keywords],
