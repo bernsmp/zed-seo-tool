@@ -255,23 +255,35 @@ def _mapping_checkpoint_is_consistent(result: dict) -> bool:
     return len(result.get("results", [])) == expected_count
 
 
-def save_results(slug: str, result_type: str, data: dict) -> Path:
-    """Save cleaning or mapping results with timestamp.
-    result_type: 'cleaning' or 'mapping'
-    """
-    # Save to Supabase if available
+def _save_remote_result(slug: str, result_type: str, data: dict) -> bool:
     if db.is_available():
         try:
             db.save_result(slug, result_type, data)
+            return True
         except Exception as exc:
             # Keep the app running even if remote persistence is unavailable.
             print(f"[save_results] Remote save failed for {slug}/{result_type}: {exc}")
+    return False
 
-    # Also save locally
+
+def _save_local_result(slug: str, result_type: str, data: dict) -> Path:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = _client_dir(slug) / f"{result_type}_{ts}.json"
     path.write_text(json.dumps(data, indent=2))
     return path
+
+
+def save_results(slug: str, result_type: str, data: dict) -> Path:
+    """Save a result remotely when available and keep a local copy."""
+    _save_remote_result(slug, result_type, data)
+    return _save_local_result(slug, result_type, data)
+
+
+def save_incident_report(slug: str, data: dict) -> tuple[Path, bool]:
+    """Save a diagnostic-only incident and report remote queue delivery."""
+    remote_saved = _save_remote_result(slug, "error_report", data)
+    path = _save_local_result(slug, "error_report", data)
+    return path, remote_saved
 
 
 def load_latest_results(slug: str, result_type: str) -> Optional[dict]:

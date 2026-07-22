@@ -11,6 +11,7 @@ from utils.data import (
     parse_keyword_csv,
     save_results,
 )
+from utils.incidents import report_incident
 from utils.llm import cost_tracker, estimate_cost, format_llm_error, map_keywords
 
 st.markdown("""
@@ -325,8 +326,28 @@ if df is not None and len(df) > 0:
                         "mapping",
                         {"results": list(all_results), "meta": checkpoint_meta},
                     )
+                    incident = report_incident(
+                        client_slug=selected_client,
+                        job_type="keyword_mapping",
+                        failed_batch=batch_idx + 1,
+                        processed_batches=batch_idx,
+                        total_batches=total_batches,
+                        saved_result_count=len(all_results),
+                        error_message=error_message,
+                    )
+                    checkpoint_meta["incident_id"] = incident["incident_id"]
                     st.session_state.mapping_results = list(all_results)
                     st.session_state.mapping_meta = checkpoint_meta
+                    if incident["remote_saved"]:
+                        st.info(
+                            "Your progress is safe, and this error was sent to support. "
+                            f"Reference {incident['incident_id'][:8]}."
+                        )
+                    else:
+                        st.warning(
+                            "Your progress is safe. The support report couldn't be sent, "
+                            "so please share the error shown above."
+                        )
                     status.update(
                         label=(
                             f"Stopped at batch {batch_idx + 1}. "
